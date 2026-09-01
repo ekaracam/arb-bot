@@ -499,7 +499,7 @@ async function main(): Promise<void> {
             `kuyruk=${s.queueDepth} atılan=${s.droppedCount} ` +
             `elenen[derinlik=${s.rejectedByDepth} transfer=${s.rejectedByTransfer} ` +
             `adres=${s.rejectedByAddress} bayat=${s.rejectedByStale} ` +
-            `makulDegil=${s.makulDegilAday} inceHavuz=${s.rejectedByImpact}] ` +
+            `makulDegil=${s.makulDegilAday} inceHavuz=${s.rejectedByImpact}/${s.inceHavuzOnceliksiz}] ` +
             `dexQuote[${s.dexQuoteOk}/${s.dexQuoteTried} hata=${s.dexQuoteError}] ` +
             `capraz[${c ? `${c.basarili}/${c.denendi} rotasiz=${c.rotasiz} hata=${c.hata}` : 'kapalı'}]` +
             // Hata SAYISI tek başına teşhis etmiyor: canlı koşuda `hata=117`

@@ -69,6 +69,7 @@ export interface RenderState {
     rejectedByTransfer: number;
     makulDegilAday: number;
     rejectedByImpact: number;
+    inceHavuzOnceliksiz: number;
     sonInceHavuz: string | null;
     rejectedByAddress: number;
     rejectedByStale: number;

@@ -116,6 +116,21 @@ const ONCELIK_CEZASI = 1_000_000;
 const MAX_FIYAT_ETKISI = 0.05;
 
 /**
+ * İnce havuz bilgisinin saklanma süresi.
+ *
+ * ÖLÇÜLEN GEREKÇE: 7 dakikada 440 quote çağrısı ince havuz yüzünden elendi,
+ * ama token bazında ölçüldüğünde sorunlu token sayısı ~56. Yani aynı gerçeği
+ * defalarca öğreniyorduk. Likidite dakikalar içinde büyük değişmiyor;
+ * bir kez öğrenilen bilgi bu süre boyunca geçerli sayılabilir.
+ *
+ * Kod tabanının kendi deseni: `EvmDexFeed` fiyatlanamayan tokeni 20 tur sonra
+ * sorgudan düşürüp 100 turda bir yeniden deniyor. Süre SONLU olmak zorunda —
+ * likidite geri gelebilir ve tokenın kalıcı olarak kör kalması, düzeltmenin
+ * amacını aşardı.
+ */
+const INCE_HAVUZ_TTL_MS = 10 * 60_000;
+
+/**
  * `pickChain`'in sonucu — başarısızlıkta GEREKÇESİYLE birlikte.
  *
  * Gerekçe dönüş değerinde taşınıyor çünkü sayacı `pickChain`'in içinde
@@ -231,6 +246,15 @@ export class Scanner {
   /** İşlem büyüklüğünü taşımayan havuz yüzünden elenen bacak. */
   private rejectedByImpact = 0;
   private sonInceHavuz: string | null = null;
+  /**
+   * "Bu slot işlem büyüklüğünü taşımıyor" bilgisinin son kullanma anı.
+   *
+   * Slot indeksli bir tipli dizi: Aşama 1 hot path'inde Map araması ya da
+   * string birleştirme yapılmaz (allocation'sız kalma kuralı).
+   */
+  private readonly inceHavuzSonu: Float64Array;
+  /** Hafızadaki ince havuz yüzünden önceliği düşürülen aday. */
+  private inceHavuzOnceliksiz = 0;
   private rejectedByStale = 0;
   /**
    * Kimlik çakışması yüzünden elenen adaylar (aynı ticker, farklı kontrat).
@@ -313,6 +337,7 @@ export class Scanner {
     private readonly capraz: CaprazKontrol | null = null,
   ) {
     this.venues = [...venues];
+    this.inceHavuzSonu = new Float64Array(store.pairCount * store.venueCount);
     this.maxConcurrent = opts.maxConcurrentChecks ?? 8;
     this.maxQueue = opts.maxQueueDepth ?? 40;
 
@@ -387,6 +412,7 @@ export class Scanner {
       rejectedByTransfer: this.rejectedByTransfer,
       makulDegilAday: this.makulDegilAday,
       rejectedByImpact: this.rejectedByImpact,
+      inceHavuzOnceliksiz: this.inceHavuzOnceliksiz,
       sonInceHavuz: this.sonInceHavuz,
       rejectedByAddress: this.rejectedByAddress,
       rejectedByStale: this.rejectedByStale,
@@ -500,8 +526,17 @@ export class Scanner {
       // Kuyruk sırası ham farka göre; bozuk fiyat her zaman en büyük ham farkı
       // ürettiği için tepeyi o işgal eder. Önceliği dibe çekmek, aday hakkını
       // kaybetmeden diğerlerinin önünü açar (bkz. IMPLAUSIBLE_RAW_PCT).
+      // İnce havuz HAFIZASI — aynı gerçeği tekrar tekrar öğrenmeyi bırakır.
+      // Ölçüldü: 7 dakikada 440 eleme, ama sorunlu token sayısı ~56.
+      // Eleme değil öncelik düşürme, `makulDegil` ile aynı gerekçe: TTL
+      // dolduğunda ya da kapasite boşken aday yeniden denenmeli.
+      const inceHavuz =
+        now < this.inceHavuzSonu[bestAskSlot]! || now < this.inceHavuzSonu[bestBidSlot]!;
+      if (inceHavuz) this.inceHavuzOnceliksiz++;
+
       const makulDegil = rawPct > IMPLAUSIBLE_RAW_PCT;
-      const oncelik = makulDegil ? rawPct - ONCELIK_CEZASI : rawPct;
+      const oncelik =
+        makulDegil || inceHavuz ? rawPct - ONCELIK_CEZASI : rawPct;
 
       // Çift başına doğrulama soğuması.
       //
@@ -654,7 +689,7 @@ export class Scanner {
       // Solana geniş taraması miktar yazmaz (orta fiyat verir); gerçek
       // gerçekleşecek miktarı ancak quote çağrısı söyler. EVM feed'leri miktarı
       // zaten yazdığı için buraya düşmez.
-      const base = await this.quoteDexLeg('buy', c.buyVenue, c.pair, tradeSize);
+      const base = await this.quoteDexLeg('buy', c.buyVenue, c.pair, tradeSize, c.buySlot);
       if (base === null) {
         this.rejectedByDepth++;
         return;
@@ -683,7 +718,7 @@ export class Scanner {
     }
 
     if (!sellFill.complete && isDex(c.sellVenue)) {
-      const quote = await this.quoteDexLeg('sell', c.sellVenue, c.pair, baseBought);
+      const quote = await this.quoteDexLeg('sell', c.sellVenue, c.pair, baseBought, c.sellSlot);
       if (quote === null) {
         this.rejectedByDepth++;
         return;
@@ -1010,6 +1045,7 @@ export class Scanner {
     venue: VenueId,
     pair: PairKey,
     miktar: number,
+    slot: number,
   ): Promise<number | null> {
     this.dexQuoteTried++;
 
@@ -1050,8 +1086,13 @@ export class Scanner {
       if (sonuc.etkiPct !== null && sonuc.etkiPct > MAX_FIYAT_ETKISI) {
         this.rejectedByImpact++;
         this.sonInceHavuz = `${symbol}/${venue} etki %${(sonuc.etkiPct * 100).toFixed(1)}`;
+        if (slot >= 0) this.inceHavuzSonu[slot] = Date.now() + INCE_HAVUZ_TTL_MS;
         return null;
       }
+
+      // Havuz taşıyorsa hafıza SİLİNİR: likidite geri gelmiş olabilir ve eski
+      // kayıt tokeni haksızca kör bırakmamalı.
+      if (slot >= 0) this.inceHavuzSonu[slot] = 0;
 
       this.dexQuoteOk++;
       return sonuc.miktar;

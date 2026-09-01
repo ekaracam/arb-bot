@@ -222,6 +222,66 @@ basılmıyordu). Bu haliyle **güvenli ama kapasiteye takılı**: atılan her za
 en zayıf aday olduğu için gerçek bir fırsat düşmez, ama Aşama 2 doyuma ulaşmış
 demektir.
 
+## Aday kalitesi: ölçülen en pahalı darboğaz
+
+**"0 sinyal" tek başına hiçbir şey teşhis etmiyor** — eşiğin az mı çok mu
+altında kaldığımızı, hatta kâr hesabına ulaşılıp ulaşılmadığını bile
+söylemiyor. Üç sayaç eklendi (panelde ve koşu günlüğünde):
+`netHesaplanan` (boru hattının sonuna kaç aday vardı), `enIyiNetPct` (oraya
+varanların gördüğü en iyi oran) ve `netKayit` (o bütçeyi hangi çiftler yaktı).
+
+Bunlar olmadan eşik ayarı körlemesine yapılıyordu. İlk ölçüm (5 dk):
+**39901 adayın 117'si** kâr hesabına ulaşabildi ve görülen en iyi net
+**%-17.6** idi — yani eşiğin biraz altında değil, yapısal olarak zararda.
+Döküm sebebi tek satırda gösterdi: kâr hesabına ulaşan 12 çiftin **12'si de**
+bozuk bir DEX fiyatından geliyordu (`FIGHT|jupiter->raydium ×53 @ %-87.71`,
+`ANTFUN|raydium->kucoin ×22 @ %-99.95`).
+
+Mekanizma: kuyruk **ham farka göre** sıralı ve bozuk fiyatın ham farkı her
+zaman gerçek fırsatınkinden büyük — dolayısıyla tepeyi HER ZAMAN o işgal
+ediyor. CLAUDE.md'de "test edilmemiş varsayım" olarak duran madde böylece
+ölçüldü ve YANLIŞ çıktı.
+
+Üç katman eklendi, her biri ölçülerek:
+
+| katman | ne yapar | eşik nereden geldi |
+|---|---|---|
+| makul olmayan ham fark | %20 üstü ham farkın kuyruk önceliğini dibe çeker | net karşılığıyla (`IMPLAUSIBLE_NET_PCT`) aynı |
+| referans fiyat filtresi | Raydium orta fiyatı Jupiter'den >%20 saparsa store'a YAZILMAZ | 108 mint'te %6–26 bandı BOŞ çıktı |
+| fiyat etkisi kontrolü | Aşama 2 quote'unda etki >%5 ise bacak elenir | ZEUS'ta ölçülen etki %250 — eşiğin yeri tartışmalı değil |
+
+Ölçülen etki: **en iyi net %-17.65 → %-0.194**, ve döküm gerçek çiftlerle
+doldu (`DOOD|jupiter->okx %-0.19`, `BERT|gate->raydium %-0.38`).
+
+**ELEME DEĞİL ÖNCELİK DÜŞÜRME — ve bu ayrım bir kez ihlal edildi.** İlk sürüm
+makul olmayan adayı kuyruğa hiç almıyordu; o sürüm `IMPLAUSIBLE_NET_PCT`
+uyarısını ULAŞILAMAZ yaptı (var olan bir test yakaladı). O uyarı kasten eleme
+değil: sebebi bilinmeyen bir sinyal görünür kalmalı. Sorun zaten adayın
+doğrulanması değil, DİĞERLERİNİ AÇ BIRAKMASIYDI.
+
+**İnce havuz, rotasızlıktan AYRI teşhistir.** Ölçülen örnek `ZEUS`: orta
+fiyatı Jupiter'le %2.5 uyumlu (referans filtresi haklı olarak geçiriyor) ama
+$500'lük quote birim fiyatı **3.5 katına** çıkıyor — havuz doğru fiyatlı,
+sadece o büyüklüğü taşımıyor. İkisini aynı kovaya koymak kullanıcıyı token
+silmeye yöneltirdi; oysa token sağlam. Değer zaten elimizdeydi: iki Solana
+quoter'ı da fiyat etkisini döndürüyor ve **Jupiter'inki ayrıştırılıp
+atılıyordu**.
+
+**İnce havuz HATIRLANIR** (`INCE_HAVUZ_TTL_MS`, 10 dk). Ölçüldü: 7 dakikada
+440 ince-havuz elemesi, ama sorunlu token sayısı ~56 — aynı gerçeği defalarca
+öğreniyorduk. Hafıza slot indeksli bir `Float64Array` (Aşama 1 hot path'inde
+Map araması yok) ve TTL SONLU: likidite geri gelebilir.
+
+**Token evreninin likiditesi ölçüldü** ($500, Raydium, 137 token):
+
+| <%1 etki | %1–5 | %5–10 | %10–50 | >%50 | rota yok |
+|---|---|---|---|---|---|
+| 65 | 16 | 6 | 11 | 21 | 18 |
+
+Yani **81 token (%59)** $500'ü %5'ten az etkiyle taşıyor. Uçtaki 21 token
+kuyruğu kirleten sınıf. Bu tablo, "coin seçiminde hacim hiç kullanılmıyor"
+boşluğunun doğrudan faturası: eleme Aşama 2'de, yani en pahalı yerde yapılıyor.
+
 ## Hot path kuralı
 
 [price-store.ts](src/book/price-store.ts) sabit boyutlu bir `Float64Array` matrisidir:

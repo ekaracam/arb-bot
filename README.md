@@ -2,8 +2,13 @@
 
 Borsalar arası arbitraj fırsatlarını tespit eden, terminal tabanlı bildirim botu.
 
-**6 CEX** — Binance, Bybit, OKX, Gate.io, MEXC, KuCoin
-**3 zincir** — Solana (Jupiter), Base (Aerodrome), Arbitrum (Camelot + Uniswap V3)
+**7 CEX** — Binance, Bybit, OKX, Gate.io, MEXC, KuCoin, Kraken
+**3 zincir** — Solana (Jupiter + Raydium), Base (Aerodrome + Uniswap V3),
+Arbitrum (Camelot + Uniswap V3)
+
+Base ve Arbitrum bacakları yayınlanmadan önce **CoW Protocol** ile çapraz
+kontrol edilir: rotayı biz seçtiğimiz için hata da bizim olabilir, CoW ise
+rotayı solver'a kurdurur — bağımsız ikinci görüş.
 
 v1 yalnızca **tespit ve bildirim** yapar; hiçbir emir göndermez. Otomasyon
 katmanının arayüzleri baştan yazıldı, v2'de motor kodu değişmeden devreye girer.
@@ -74,7 +79,7 @@ npm run dev               # botu başlat (terminal arayüzüyle)
 Bunları bota güvenmeden önce çalıştır:
 
 ```bash
-npm run feeds             # 6 borsaya bağlan, 30 sn dinle, gecikme + sembol raporu
+npm run feeds             # borsalara bağlan, 30 sn dinle, gecikme + sembol raporu
 npm run feeds -- okx 60   # tek borsa, 60 saniye
 npm run dex               # Solana mint adreslerini ve Jupiter quote'larını doğrula
 npm run verify-contracts  # EVM kontrat + token adreslerini ZİNCİRDEN doğrula
@@ -104,7 +109,7 @@ aynı sahte sinyalleri kovalar.
 
 ## Bilinen sınırlar
 
-### 1. Dört borsada çekim durumu doğrulanamıyor
+### 1. Çekim/yatırma durumu borsaya göre değişen kaynaklardan geliyor
 
 Bir arbitrajın gerçek olması için coin'in alış borsasından **çekilebiliyor** ve
 satış borsasına **yatırılabiliyor** olması gerekir. Çekimi kapalı bir coinde
@@ -113,7 +118,12 @@ görünen %5 fark fırsat değil, tuzaktır — piyasa zaten o yüzden ayrışm�
 | Borsa | Kaynak |
 |---|---|
 | Gate.io, KuCoin | ✅ public API — gerçek veri |
-| Binance, Bybit, OKX, MEXC | ⚠️ yalnızca private endpoint'te |
+| Binance, Bybit, OKX, MEXC, Kraken | ⚠️ yalnızca private endpoint'te (salt-okunur anahtar yeter) |
+
+Durum bilgisi **15 dakikada bir** tazelenir. Bu bir operasyonel bilgidir: borsa
+ağ bakımına girdiğinde dakikalar içinde kapanır, ve bayat tabloyla üretilen
+sinyal hem yanlış hem ısrarcı olur (kapanan yatırma, fiyat ayrışmasının
+sebebidir). Tablo tazelenemezse sinyal bunu uyarı olarak taşır.
 
 İkinci gruptaki fırsatlar `?` işareti ve açık uyarı ile bildirilir. Salt-okunur
 API anahtarı eklendiğinde çözülür: `src/engine/transfer-info.ts` içine bir
@@ -149,8 +159,9 @@ src/
   core/        types · config · http (rate limit) · metrics
   book/        price-store (Float64Array) · depth-cache
   feeds/
-    cex/       base-feed · binance · bybit · okx · gate · mexc · kucoin · pool
-    dex/       jupiter · evm (Aerodrome/Camelot/UniV3)
+    cex/       base-feed · binance · bybit · okx · gate · mexc · kucoin · kraken · pool
+    dex/       solana-feed (jupiter/raydium) · jupiter · raydium · leg-quoter
+               evm (Aerodrome/Camelot/UniV3) · cow · capraz (çapraz kontrol)
   normalize/   symbol-registry
   engine/      scanner · vwap · transfer-info
   notify/      telegram · dedup · format

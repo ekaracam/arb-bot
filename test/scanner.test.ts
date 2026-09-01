@@ -1394,3 +1394,63 @@ test('etki bilgisi YOKSA bacak elenmez (bilinmeyen ≠ kötü)', async () => {
 
   assert.equal(r.emitted.length, 1);
 });
+
+test('ince havuz HATIRLANIR: kuyruk dolunca gerçek adaya yenilir', async () => {
+  // Ölçüldü: 7 dakikada 440 ince-havuz elemesi, ama sorunlu token sayısı ~56 —
+  // aynı gerçeği defalarca öğreniyorduk. Hafıza ELEME değil öncelik düşürme:
+  // kapasite boşken aday yeniden denenir (likidite geri gelmiş olabilir),
+  // kapasite doluyken gerçek adayın önünü tıkamaz. Gerçek koşuda kuyruk sürekli
+  // dolu olduğu için pratikte tasarruf tamdır.
+  const q = fakeLegQuoter({ buyBase: 1000, etkiPct: 2.5 });
+  const r = rig({
+    pairs: ['AAA/USDT' as PairKey, 'BBB/USDT' as PairKey],
+    venues: ['jupiter', 'binance'],
+    legQuoter: q.quoter,
+    scanner: { maxQueueDepth: 1, maxConcurrentChecks: 1 },
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0 } },
+  });
+
+  const yaz = (pair: PairKey, jupAsk: number, binBid: number) => {
+    const t = Date.now();
+    r.store.write(r.store.resolveSlot(pair, 'jupiter'), jupAsk, 0, jupAsk, 0, t, t);
+    r.store.write(r.store.resolveSlot(pair, 'binance'), binBid, 1e6, binBid + 0.01, 1e6, t, t);
+  };
+
+  // İlk tur: yalnızca AAA var, quote atılır ve ince havuz öğrenilir.
+  yaz('AAA/USDT' as PairKey, 1.0, 1.10);
+  await r.run();
+  assert.ok(q.calls.length > 0, 'ilk turda quote atılmalıydı');
+  const st = () => r.scanner.stats as unknown as { inceHavuzOnceliksiz: number };
+  assert.ok(st().inceHavuzOnceliksiz === 0, 'ilk turda hafıza henüz boş');
+
+  // İkinci tur: AAA (ince, ham fark BÜYÜK) ile BBB (sağlam, ham fark küçük)
+  // tek kişilik kuyrukta yarışıyor. Hafıza olmasaydı AAA kazanırdı.
+  yaz('AAA/USDT' as PairKey, 1.0, 1.10);
+  yaz('BBB/USDT' as PairKey, 1.0, 1.02);
+  await r.run();
+
+  assert.ok(st().inceHavuzOnceliksiz > 0, 'öncelik düşürme sayılmalı');
+  assert.ok(
+    q.calls.some((c) => c.includes(':BBB:')),
+    `gerçek aday doğrulanmalıydı, çağrılar: ${q.calls.join(',')}`,
+  );
+});
+
+test('havuz düzelirse hafıza silinir', async () => {
+  const q = fakeLegQuoter({ buyBase: 1000, etkiPct: 0.01 });
+  const r = rig({
+    venues: ['jupiter', 'binance'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0 } },
+  });
+  const t = Date.now();
+  r.store.write(r.slot('jupiter'), 1.0, 0, 1.0, 0, t, t);
+  r.store.write(r.slot('binance'), 1.05, 1e6, 1.06, 1e6, t, t);
+  await r.run();
+
+  assert.equal(r.emitted.length, 1);
+  assert.equal(
+    (r.scanner.stats as unknown as { inceHavuzOnceliksiz: number }).inceHavuzOnceliksiz,
+    0,
+  );
+});
