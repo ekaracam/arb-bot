@@ -51,6 +51,13 @@ export class TelegramNotifier {
       suppressed: this.suppressedCount,
       failed: this.failedCount,
       queued: this.queue.length,
+      // ÖLÇÜLEN EKSİK: bu alan buradan hep dışa açıktı ama HİÇBİR YERDE
+      // OKUNMUYORDU — ne panel ne koşu günlüğü. Kaçırılmamış tek bir
+      // MarkdownV2 karakteri Telegram'a mesajın tamamını HTTP 400 ile
+      // reddettirdi; görünen tek şey `failed` sayacının artmasıydı ve koşu
+      // günlüğü "📤 → telegram" demeye devam etti (o satır GÖNDERİLDİ değil
+      // SIRAYA ALINDI demek: `notify()` kuyruğa ekler, gönderim `drain()`
+      // içinde). Hata, kullanıcının "mesaj gelmedi" demesiyle bulundu.
       lastError: this.lastError,
     };
   }

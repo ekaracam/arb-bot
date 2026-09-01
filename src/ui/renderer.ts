@@ -99,7 +99,12 @@ export interface RenderState {
     hata: number;
     sonHata: string | null;
   } | null;
-  readonly telegram: { sent: number; suppressed: number; failed: number } | null;
+  readonly telegram: {
+    sent: number;
+    suppressed: number;
+    failed: number;
+    lastError: string | null;
+  } | null;
   readonly pairCount: number;
   readonly startedAt: number;
 }

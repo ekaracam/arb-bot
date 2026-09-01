@@ -68,10 +68,14 @@ export function formatOpportunity(o: Opportunity): string {
   // kullanıcı kontrolün hiç çalışmadığı bir gecede sinyale fazladan güvenir.
   if (o.capraz) {
     const sap = o.capraz.sapmaPct * 100;
-    const isaret = sap > 0 ? '\+' : '';
+    // MarkdownV2'de parantez ve artı ÖZEL karakterdir; kaçışsız bırakılan tek
+    // karakter mesajın TAMAMINI düşürür (HTTP 400) ve `notify()` bunu göremez,
+    // çünkü o yalnızca "sıraya alındı" der. Ölçüldü: bu satırın ilk sürümü
+    // parantezleri ham bıraktı ve `capraz` taşıyan ilk sinyal (KTA) hiç
+    // ulaşmadı. Metnin tamamı `esc`'ten geçirilerek yazılmalı.
     lines.push(
-      `🔍 Çapraz (${esc(o.capraz.kaynak)} vs ${esc(o.capraz.venue)}): ` +
-        `${isaret}${num(sap)}${esc('%')}`,
+      `🔍 Çapraz ${esc(`(${o.capraz.kaynak} vs ${o.capraz.venue}):`)} ` +
+        `${sap > 0 ? esc('+') : ''}${num(sap)}${esc('%')}`,
     );
   }
 

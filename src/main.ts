@@ -463,6 +463,7 @@ async function main(): Promise<void> {
             sent: telegram.stats.sent,
             suppressed: telegram.stats.suppressed,
             failed: telegram.stats.failed,
+            lastError: telegram.stats.lastError,
           }
         : null,
       pairCount: registry.pairCount,
@@ -509,6 +510,10 @@ async function main(): Promise<void> {
             (s.sonInceHavuz ? ` sonInceHavuz="${s.sonInceHavuz}"` : '') +
             (s.dexQuoteError > 0 && s.lastDexQuoteError
               ? ` sonDexHata="${s.lastDexQuoteError.slice(0, 90)}"`
+              : '') +
+            (telegram && telegram.stats.failed > 0
+              ? ` TELEGRAM_HATA=${telegram.stats.failed}` +
+                (telegram.stats.lastError ? ` "${telegram.stats.lastError.slice(0, 80)}"` : '')
               : '') +
             (bozuk.length > 0 ? ` FEED_SORUN=${bozuk.join(',')}` : ''),
         );

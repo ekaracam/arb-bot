@@ -36,6 +36,17 @@ export interface OpportunityRecord {
   readonly costs: Opportunity['costs'];
   readonly transferVerified: boolean;
   readonly warnings: readonly string[];
+  /**
+   * DEX bacağının bağımsız ikinci kaynakla karşılaştırması (CoW).
+   *
+   * ÖLÇÜLEN EKSİK: çapraz kontrol canlıda ilk kez çalıştığında (`capraz[1/1]`,
+   * `KTA aerodrome->kraken`) sonucu panele ve Telegram'a gitti ama DİSKE
+   * GİTMEDİ — bu serileştirici alanları tek tek seçiyor ve `capraz` listede
+   * yoktu. Sonucu: `calibrate` kontrolün ne sıklıkla çalıştığını ve ne kadar
+   * saptığını HİÇ ölçemezdi. Kontrolün kendisi kadar, sonucunun ölçülebilir
+   * olması da gerekiyor.
+   */
+  readonly capraz?: Opportunity['capraz'];
   readonly worstAgeMs: number;
 }
 
@@ -89,6 +100,7 @@ export class NdjsonWriter {
       costs: opp.costs,
       transferVerified: opp.transferVerified,
       warnings: opp.warnings,
+      ...(opp.capraz ? { capraz: opp.capraz } : {}),
       worstAgeMs: opp.worstAgeMs,
     };
     this.buffer.push(JSON.stringify(rec));

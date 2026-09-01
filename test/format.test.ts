@@ -151,3 +151,65 @@ test('formatRow: uzun coin adı sütun düzenini kaydırmaz', () => {
   const uzun = formatRow(opp({ coin: 'ABCDEFGHIJKL' }), 100);
   assert.equal(kisa.length, uzun.length);
 });
+
+// ---------------------------------------------------------------------------
+// MarkdownV2 kaçışı — SESSİZ mesaj kaybının kaynağı
+//
+// ÖLÇÜLEN HATA (2026-09-01): çapraz kontrol satırı parantezleri ham bıraktı.
+// MarkdownV2'de `(` ve `)` özeldir; kaçışsız TEK karakter Telegram'a mesajın
+// TAMAMINI HTTP 400 ile reddettiriyor. `notify()` bunu göremez — o yalnızca
+// "sıraya alındı" der, gerçek gönderim `drain()` içinde ve hatası yalnızca bir
+// sayaca yazılıyordu. Sonuç: koşu günlüğü "📤 KTA → telegram" derken mesaj
+// hiç ulaşmadı.
+//
+// Bu test tek bir satırı değil, ÇIKTININ TAMAMINI tarıyor: aynı sınıf hata
+// yeni bir satır eklendiğinde tekrar edecek.
+// ---------------------------------------------------------------------------
+
+/** Kasıtlı biçimlendirmeyi (kalın, kod) söküp geriye kalan metni verir. */
+function biciminiSok(s: string): string {
+  return s.replace(/\*[^*]*\*/g, '').replace(/`[^`]*`/g, '');
+}
+
+/** MarkdownV2'de kaçış İSTEYEN ama kaçırılmamış karakterleri bulur. */
+function kacirilmamis(s: string): string[] {
+  const ozel = '_[]()~>#+-=|{}.!';
+  const bulunan: string[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (!ozel.includes(c)) continue;
+    if (i > 0 && s.charCodeAt(i - 1) === 92) continue;
+    bulunan.push(`${c} @${i}`);
+  }
+  return bulunan;
+}
+
+test('çapraz kontrol satırı MarkdownV2 kaçışını bozmaz', () => {
+  const o = opp({
+    capraz: { kaynak: 'cow', venue: 'aerodrome', sapmaPct: 0.0123 },
+  });
+  const metin = formatOpportunity(o);
+
+  assert.ok(metin.includes('Çapraz'), 'çapraz satırı basılmalı');
+  assert.deepEqual(
+    kacirilmamis(biciminiSok(metin)),
+    [],
+    `kaçırılmamış özel karakter var — Telegram mesajın TAMAMINI düşürür:\n${metin}`,
+  );
+});
+
+test('negatif sapmada da kaçış bozulmaz', () => {
+  const o = opp({
+    capraz: { kaynak: 'cow', venue: 'uniswap-v3-base', sapmaPct: -0.0456 },
+  });
+  assert.deepEqual(kacirilmamis(biciminiSok(formatOpportunity(o))), []);
+});
+
+test('kaçış doğrulayıcısı BOZUK metni gerçekten yakalar', () => {
+  // Doğrulayıcı boş yere geçmemeli: kaçışsız parantezi görmezse yukarıdaki iki
+  // test hiçbir şey ölçmez ve aynı hata sessizce geri döner.
+  assert.deepEqual(kacirilmamis(biciminiSok('🔍 Çapraz (cow vs aerodrome)')).length, 2);
+  // `String.raw`: düz dizide '\(' TypeScript'te GEÇERSİZ bir kaçıştır ve
+  // sessizce '(' olur — asıl hatanın ('\+' → '+') birebir aynısı.
+  assert.equal(kacirilmamis(biciminiSok(String.raw`🔍 Çapraz \(cow\)`)).length, 0);
+});
