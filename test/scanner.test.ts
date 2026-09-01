@@ -15,7 +15,7 @@ import { PriceStore } from '../src/book/price-store.ts';
 import { isCex } from '../src/core/types.ts';
 import type { DexId, Opportunity, PairKey, VenueId } from '../src/core/types.ts';
 import type { CaprazKontrol, CaprazSonuc } from '../src/feeds/dex/capraz.ts';
-import type { DexLegQuoter } from '../src/feeds/dex/leg-quoter.ts';
+import type { DexLegQuoter, DexLegSonuc } from '../src/feeds/dex/leg-quoter.ts';
 import {
   fakeDepth,
   fakeRegistry,
@@ -46,18 +46,24 @@ interface Rig {
  * Gerçeği Jupiter'e HTTP atar; test ağa çıkmamalı. Burada tek değişken
  * quoter'ın döndürdüğü MİKTAR — kâr hesabının DEX tarafını belirleyen şey o.
  */
-function fakeLegQuoter(opts: { buyBase?: number | null; sellQuote?: number | null } = {}) {
+function fakeLegQuoter(
+  opts: { buyBase?: number | null; sellQuote?: number | null; etkiPct?: number } = {},
+) {
   const calls: string[] = [];
+  // Varsayılan etki 0: testlerin konusu miktar, ince havuz elemesi ayrıca
+  // test ediliyor. `etkiPct` verilerek o yol açılır.
+  const sar = (m: number | null | undefined): DexLegSonuc | null =>
+    m === undefined || m === null ? null : { miktar: m, etkiPct: opts.etkiPct ?? 0 };
   return {
     calls,
     quoter: {
-      async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<number | null> {
+      async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<DexLegSonuc | null> {
         calls.push(`buy:${venue}:${symbol}:${quoteAmount}`);
-        return opts.buyBase === undefined ? null : opts.buyBase;
+        return sar(opts.buyBase);
       },
-      async sell(venue: DexId, symbol: string, baseAmount: number): Promise<number | null> {
+      async sell(venue: DexId, symbol: string, baseAmount: number): Promise<DexLegSonuc | null> {
         calls.push(`sell:${venue}:${symbol}:${baseAmount}`);
-        return opts.sellQuote === undefined ? null : opts.sellQuote;
+        return sar(opts.sellQuote);
       },
     } satisfies DexLegQuoter,
   };
@@ -1262,4 +1268,129 @@ test('ek kesinti DEX bacağına uygulanmaz (havuz ücreti quote fiyatında)', as
   assert.equal(r.emitted.length, 1, 'tek CEX bacağı %1.5, brüt %5 — fırsat kalmalı');
   // Alış DEX'te: alış komisyonu sıfır olmalı.
   assert.equal(r.emitted[0]!.buy.feeQuote, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Makul olmayan HAM fark — Aşama 1 elemesi
+//
+// ÖLÇÜLDÜ (2026-09-01): kuyruk ham farka göre sıralandığı için tepeyi her
+// zaman BOZUK fiyatlar işgal ediyor. 7 dakikada kâr hesabına ulaşan 12 çiftin
+// 12'si de bozuk kaynaklıydı ve net oranları %-17 ile %-99.95 arasındaydı.
+// Yani doğrulama kapasitesinin TAMAMI sinyale dönüşemeyecek adaylara gidiyordu.
+// ---------------------------------------------------------------------------
+
+const makulDegilSayaci = (r: Rig): number =>
+  (r.scanner.stats as unknown as { makulDegilAday: number }).makulDegilAday;
+
+test('ham farkı %20 üstü aday SAYILIR ama elenmez', async () => {
+  const r = rig({
+    venues: ['binance', 'kucoin'],
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0, kucoin: 0 } },
+  });
+
+  // %100 ham fark — ticker çakışmasının tipik imzası.
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 2.0, 1e6, 2.02, 1e6);
+  await r.run();
+
+  assert.ok(makulDegilSayaci(r) > 0, 'sayaç artmalı — sessiz davranış teşhis edilemez');
+  // Kuyruk boşken doğrulanır ve UYARISIYLA yayınlanır: eleme değil, öncelik
+  // düşürme. Elemek `IMPLAUSIBLE_NET_PCT` ağını ulaşılamaz yapardı.
+  assert.equal(r.emitted.length, 1);
+  assert.ok(r.emitted[0]!.warnings.some((w) => w.includes('veri hatası')));
+});
+
+test('makul olmayan aday kuyruk dolduğunda İLK atılan olur', async () => {
+  // Asıl mesele buydu: bozuk fiyatın ham farkı her zaman en büyük olduğu için
+  // kuyruğun tepesini o işgal ediyor ve gerçek adayları aç bırakıyordu.
+  const r = rig({
+    pairs: ['AAA/USDT' as PairKey, 'BBB/USDT' as PairKey],
+    venues: ['binance', 'kucoin'],
+    scanner: { maxQueueDepth: 1, maxConcurrentChecks: 1 },
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0, kucoin: 0 } },
+  });
+
+  const now = Date.now();
+  const yaz = (pair: PairKey, venue: VenueId, bid: number, ask: number) =>
+    r.store.write(r.store.resolveSlot(pair, venue), bid, 1e6, ask, 1e6, now, now);
+
+  // AAA: bozuk (%100 ham fark). BBB: gerçek (%2 ham fark).
+  yaz('AAA/USDT' as PairKey, 'binance', 0.99, 1.0);
+  yaz('AAA/USDT' as PairKey, 'kucoin', 2.0, 2.02);
+  yaz('BBB/USDT' as PairKey, 'binance', 0.99, 1.0);
+  yaz('BBB/USDT' as PairKey, 'kucoin', 1.02, 1.03);
+
+  await r.run();
+
+  // Kuyruk tek kişilik: hayatta kalan GERÇEK aday olmalı.
+  assert.equal(r.emitted.length, 1);
+  assert.equal(r.emitted[0]!.coin, 'BBB', 'gerçek aday bozuk adayın önünde olmalı');
+});
+
+
+// ---------------------------------------------------------------------------
+// İnce havuz — fiyat doğru, derinlik yok
+//
+// ÖLÇÜLEN ÖRNEK (ZEUS): orta fiyatı Jupiter'le %2.5 uyumlu, yani referans
+// filtresi haklı olarak geçiriyor. Ama $500'lük quote birim fiyatı 3.5 KATINA
+// çıkıyor — havuz doğru fiyatlı, sadece o büyüklüğü taşımıyor. Kâr hesabı
+// bunu zaten yakalıyordu (net %-99) ama eleme "derinlik yok" kovasına düşüyor
+// ve panelde rotasızlıkla aynı görünüyordu.
+// ---------------------------------------------------------------------------
+
+test('fiyat etkisi eşiği aşan DEX bacağı elenir ve AYRI sayılır', async () => {
+  const q = fakeLegQuoter({ buyBase: 1000, etkiPct: 2.5 }); // %250 etki
+  const r = rig({
+    venues: ['jupiter', 'binance'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0 } },
+  });
+  r.store.write(r.slot('jupiter'), 1.0, 0, 1.0, 0, Date.now(), Date.now());
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  const st = r.scanner.stats as unknown as {
+    rejectedByImpact: number;
+    sonInceHavuz: string | null;
+  };
+  assert.equal(r.emitted.length, 0, 'taşımayan havuz sinyal üretmemeli');
+  assert.equal(st.rejectedByImpact, 1);
+  // Sebep GÖRÜNÜR olmalı: "rota yok" ile aynı kovaya düşerse teşhis
+  // kullanıcıyı token silmeye yöneltir.
+  assert.match(st.sonInceHavuz ?? '', /KOIN\/jupiter etki %250/);
+});
+
+test('makul fiyat etkisi bacağı elemez', async () => {
+  const q = fakeLegQuoter({ buyBase: 1000, etkiPct: 0.02 }); // %2
+  const r = rig({
+    venues: ['jupiter', 'binance'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0 } },
+  });
+  r.store.write(r.slot('jupiter'), 1.0, 0, 1.0, 0, Date.now(), Date.now());
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  assert.equal(r.emitted.length, 1);
+  assert.equal((r.scanner.stats as unknown as { rejectedByImpact: number }).rejectedByImpact, 0);
+});
+
+test('etki bilgisi YOKSA bacak elenmez (bilinmeyen ≠ kötü)', async () => {
+  // Kaynak etkiyi vermiyorsa karar veremeyiz. Kötümser davranmak, etki
+  // alanını doldurmayan bir kaynağın tüm bacaklarını sessizce yok ederdi.
+  const q = fakeLegQuoter({ buyBase: 1000 });
+  const r = rig({
+    venues: ['jupiter', 'binance'],
+    legQuoter: {
+      buy: async () => ({ miktar: 1000, etkiPct: null }),
+      sell: async () => ({ miktar: 1000, etkiPct: null }),
+    },
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0 } },
+  });
+  void q;
+  r.store.write(r.slot('jupiter'), 1.0, 0, 1.0, 0, Date.now(), Date.now());
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  assert.equal(r.emitted.length, 1);
 });

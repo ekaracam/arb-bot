@@ -19,6 +19,7 @@
 import { DEX_CHAIN, type ChainId, type DexId } from '../../core/types.ts';
 import type { TokenEntry } from '../../core/config.ts';
 import type { DexQuote } from './jupiter.ts';
+import type { RaydiumQuote } from './raydium.ts';
 
 /**
  * Quote sağlayıcılarının DAR arayüzü.
@@ -39,7 +40,7 @@ export interface JupiterQuoteSource {
 }
 
 export interface RaydiumQuoteSource {
-  quote(inputMint: string, outputMint: string, amount: bigint): Promise<number | null>;
+  quote(inputMint: string, outputMint: string, amount: bigint): Promise<RaydiumQuote | null>;
 }
 
 /**
@@ -52,17 +53,38 @@ export interface RaydiumQuoteSource {
  * fiyatı UYGULANAMAYACAK bir rotayla karıştırmak demek — kimlik kuralının
  * venue tarafındaki karşılığı.
  */
+/**
+ * Aşama 2'nin DEX bacağından dönen sonuç.
+ *
+ * `etkiPct` neden var: miktar tek başına "bu havuz işlemi taşıyor mu"
+ * sorusunu cevaplamıyor. Ölçülen örnek ZEUS — orta fiyatı Jupiter'le %2.5
+ * uyumlu (yani fiyat kaynağı sağlam) ama $500'lük quote birim fiyatı 3.5
+ * KATINA çıkarıyor: havuz doğru fiyatlı, sadece o büyüklüğü taşımıyor.
+ * Kâr hesabı bunu zaten yakalıyor (net %-99 çıkıyor ve aday eleniyor), ama
+ * eleme sebebi "derinlik yok" kovasına düşüyor ve panelde ince havuz ile
+ * rotasızlık ayırt edilemiyordu.
+ *
+ * Değer zaten elimizdeydi: iki quoter da fiyat etkisini döndürüyor,
+ * Jupiter'inki ayrıştırılıp ATILIYORDU.
+ */
+export interface DexLegSonuc {
+  /** Gerçekleşen miktar (alışta base, satışta quote). */
+  readonly miktar: number;
+  /** Fiyat etkisi oran olarak (0.01 = %1); kaynak vermezse null. */
+  readonly etkiPct: number | null;
+}
+
 export interface DexLegQuoter {
   /**
    * Quote parasıyla base alım.
    * @returns alınabilen base miktarı, rota yoksa null
    */
-  buy(venue: DexId, symbol: string, quoteAmount: number): Promise<number | null>;
+  buy(venue: DexId, symbol: string, quoteAmount: number): Promise<DexLegSonuc | null>;
   /**
    * Base satışı.
    * @returns elde edilen quote tutarı, rota yoksa null
    */
-  sell(venue: DexId, symbol: string, baseAmount: number): Promise<number | null>;
+  sell(venue: DexId, symbol: string, baseAmount: number): Promise<DexLegSonuc | null>;
 }
 
 /**
@@ -79,11 +101,11 @@ export class VenueLegQuoter implements DexLegQuoter {
     return [...this.byVenue.keys()];
   }
 
-  async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<number | null> {
+  async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<DexLegSonuc | null> {
     return (await this.byVenue.get(venue)?.buy(venue, symbol, quoteAmount)) ?? null;
   }
 
-  async sell(venue: DexId, symbol: string, baseAmount: number): Promise<number | null> {
+  async sell(venue: DexId, symbol: string, baseAmount: number): Promise<DexLegSonuc | null> {
     return (await this.byVenue.get(venue)?.sell(venue, symbol, baseAmount)) ?? null;
   }
 }
@@ -111,7 +133,7 @@ export class JupiterLegQuoter implements DexLegQuoter {
     return this.quoteToken !== undefined;
   }
 
-  async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<number | null> {
+  async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<DexLegSonuc | null> {
     const token = this.token(venue, symbol);
     if (!token || !this.quoteToken || !(quoteAmount > 0)) return null;
 
@@ -122,10 +144,10 @@ export class JupiterLegQuoter implements DexLegQuoter {
       this.quoteToken.decimals,
       token.decimals,
     );
-    return q && q.outAmount > 0 ? q.outAmount : null;
+    return q && q.outAmount > 0 ? { miktar: q.outAmount, etkiPct: q.priceImpact } : null;
   }
 
-  async sell(venue: DexId, symbol: string, baseAmount: number): Promise<number | null> {
+  async sell(venue: DexId, symbol: string, baseAmount: number): Promise<DexLegSonuc | null> {
     const token = this.token(venue, symbol);
     if (!token || !this.quoteToken || !(baseAmount > 0)) return null;
 
@@ -136,7 +158,7 @@ export class JupiterLegQuoter implements DexLegQuoter {
       token.decimals,
       this.quoteToken.decimals,
     );
-    return q && q.outAmount > 0 ? q.outAmount : null;
+    return q && q.outAmount > 0 ? { miktar: q.outAmount, etkiPct: q.priceImpact } : null;
   }
 
   private token(venue: DexId, symbol: string): TokenEntry | undefined {
@@ -172,28 +194,28 @@ export class RaydiumLegQuoter implements DexLegQuoter {
     return this.quoteToken !== undefined;
   }
 
-  async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<number | null> {
+  async buy(venue: DexId, symbol: string, quoteAmount: number): Promise<DexLegSonuc | null> {
     const token = this.token(venue, symbol);
     if (!token || !this.quoteToken || !(quoteAmount > 0)) return null;
 
-    const out = await this.quoter.quote(
+    const q = await this.quoter.quote(
       this.quoteToken.address,
       token.address,
       raw(quoteAmount, this.quoteToken.decimals),
     );
-    return out === null ? null : out / 10 ** token.decimals;
+    return q === null ? null : { miktar: q.out / 10 ** token.decimals, etkiPct: q.etkiPct };
   }
 
-  async sell(venue: DexId, symbol: string, baseAmount: number): Promise<number | null> {
+  async sell(venue: DexId, symbol: string, baseAmount: number): Promise<DexLegSonuc | null> {
     const token = this.token(venue, symbol);
     if (!token || !this.quoteToken || !(baseAmount > 0)) return null;
 
-    const out = await this.quoter.quote(
+    const q = await this.quoter.quote(
       token.address,
       this.quoteToken.address,
       raw(baseAmount, token.decimals),
     );
-    return out === null ? null : out / 10 ** this.quoteToken.decimals;
+    return q === null ? null : { miktar: q.out / 10 ** this.quoteToken.decimals, etkiPct: q.etkiPct };
   }
 
   private token(venue: DexId, symbol: string): TokenEntry | undefined {

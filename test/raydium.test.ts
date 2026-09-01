@@ -37,17 +37,17 @@ test('JupiterLegQuoter raydium bacağını CEVAPLAMAZ', async () => {
     },
   });
   assert.equal(await q.buy('raydium', 'KOIN', 1000), null);
-  assert.equal(await q.buy('jupiter', 'KOIN', 1000), 500);
+  assert.equal((await q.buy('jupiter', 'KOIN', 1000))?.miktar, 500);
 });
 
 test('RaydiumLegQuoter jupiter bacağını CEVAPLAMAZ', async () => {
   const q = new RaydiumLegQuoter(TOKENS, {
     async quote() {
-      return 500 * 10 ** 9;
+      return { out: 500 * 10 ** 9, etkiPct: 0.01 };
     },
   });
   assert.equal(await q.buy('jupiter', 'KOIN', 1000), null);
-  assert.equal(await q.buy('raydium', 'KOIN', 1000), 500);
+  assert.deepEqual(await q.buy('raydium', 'KOIN', 1000), { miktar: 500, etkiPct: 0.01 });
 });
 
 test('RaydiumLegQuoter ham miktarı decimals ile insan birimine çevirir', async () => {
@@ -56,11 +56,11 @@ test('RaydiumLegQuoter ham miktarı decimals ile insan birimine çevirir', async
     async quote(gir: string, cik: string, miktar: bigint) {
       cagrilar.push(`${gir}->${cik}:${miktar}`);
       // satış: 2 KOIN → 7.5 USDC (6 decimals)
-      return 7_500_000;
+      return { out: 7_500_000, etkiPct: null };
     },
   });
 
-  assert.equal(await q.sell('raydium', 'KOIN', 2), 7.5);
+  assert.equal((await q.sell('raydium', 'KOIN', 2))?.miktar, 7.5);
   // Girdi KOIN'in decimals'ıyla (9) ham birime çevrilmeli.
   assert.equal(cagrilar[0], 'koin111->usdc111:2000000000');
 });
@@ -70,11 +70,11 @@ test('VenueLegQuoter her venue’yu kendi doğrulayıcısına yollar', async () 
   const sahte = (ad: string): DexLegQuoter => ({
     async buy(v) {
       izler.push(`${ad}:buy:${v}`);
-      return 1;
+      return { miktar: 1, etkiPct: 0 };
     },
     async sell(v) {
       izler.push(`${ad}:sell:${v}`);
-      return 1;
+      return { miktar: 1, etkiPct: 0 };
     },
   });
 

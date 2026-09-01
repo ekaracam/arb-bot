@@ -498,13 +498,15 @@ async function main(): Promise<void> {
             } ` +
             `kuyruk=${s.queueDepth} atılan=${s.droppedCount} ` +
             `elenen[derinlik=${s.rejectedByDepth} transfer=${s.rejectedByTransfer} ` +
-            `adres=${s.rejectedByAddress} bayat=${s.rejectedByStale}] ` +
+            `adres=${s.rejectedByAddress} bayat=${s.rejectedByStale} ` +
+            `makulDegil=${s.makulDegilAday} inceHavuz=${s.rejectedByImpact}] ` +
             `dexQuote[${s.dexQuoteOk}/${s.dexQuoteTried} hata=${s.dexQuoteError}] ` +
             `capraz[${c ? `${c.basarili}/${c.denendi} rotasiz=${c.rotasiz} hata=${c.hata}` : 'kapalı'}]` +
             // Hata SAYISI tek başına teşhis etmiyor: canlı koşuda `hata=117`
             // görüldü ve sebebi (Raydium WAF bloğu) ancak dışarıdan ayrı bir
             // ölçümle bulunabildi. Sayacın yanına mesajı da koymak o adımı
             // gereksiz kılıyor.
+            (s.sonInceHavuz ? ` sonInceHavuz="${s.sonInceHavuz}"` : '') +
             (s.dexQuoteError > 0 && s.lastDexQuoteError
               ? ` sonDexHata="${s.lastDexQuoteError.slice(0, 90)}"`
               : '') +

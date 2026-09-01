@@ -103,8 +103,15 @@ const GERI_CEKILME_TAVAN_MS = 15 * 60_000;
 /** Bu kadar ARDIŞIK arıza sonrası geri çekilme başlar. */
 const ARIZA_TOLERANSI = 3;
 
+export interface RaydiumQuote {
+  /** Çıktı miktarı, ham birimde. */
+  readonly out: number;
+  /** Fiyat etkisi oran olarak (0.01 = %1); uç nokta vermezse null. */
+  readonly etkiPct: number | null;
+}
+
 export class RaydiumQuoter {
-  private readonly cache = new Map<string, { at: number; out: number | null }>();
+  private readonly cache = new Map<string, { at: number; sonuc: RaydiumQuote | null }>();
   private calls = 0;
   private failures = 0;
 
@@ -142,12 +149,16 @@ export class RaydiumQuoter {
 
   /**
    * @param amount girdi miktarı, ham birimde
-   * @returns çıktı miktarı (ham birim), rota yoksa null
+   * @returns çıktı miktarı ve fiyat etkisi, rota yoksa null
    */
-  async quote(inputMint: string, outputMint: string, amount: bigint): Promise<number | null> {
+  async quote(
+    inputMint: string,
+    outputMint: string,
+    amount: bigint,
+  ): Promise<RaydiumQuote | null> {
     const key = `${inputMint}:${outputMint}:${amount}`;
     const cached = this.cache.get(key);
-    if (cached && Date.now() - cached.at < this.ttlMs) return cached.out;
+    if (cached && Date.now() - cached.at < this.ttlMs) return cached.sonuc;
 
     // Geri çekilme penceresindeyken istek ATILMAZ. Bloklu uca yüklenmek bloğu
     // uzatıyor; ayrıca sonuç önbelleğe de yazılmaz (arıza geçici, tokenı
@@ -158,7 +169,7 @@ export class RaydiumQuoter {
     let res: {
       success?: boolean;
       msg?: string;
-      data?: { outputAmount?: string } | null;
+      data?: { outputAmount?: string; priceImpactPct?: number | string } | null;
     };
     try {
       res = await httpJson(
@@ -184,7 +195,7 @@ export class RaydiumQuoter {
         }
         throw e;
       }
-      this.cache.set(key, { at: Date.now(), out: null });
+      this.cache.set(key, { at: Date.now(), sonuc: null });
       return null;
     }
 
@@ -196,9 +207,14 @@ export class RaydiumQuoter {
     // `success:false` Raydium'un KENDİ "rota yok" cevabı — arıza değil veri.
     const ham = res.success === false ? null : (res.data?.outputAmount ?? null);
     const v = ham === null ? null : Number(ham);
-    const out = v !== null && Number.isFinite(v) && v > 0 ? v : null;
-    if (out === null) this.failures++;
-    this.cache.set(key, { at: Date.now(), out });
-    return out;
+    // `priceImpactPct` YÜZDE olarak geliyor (2.47 = %2.47), oran olarak değil.
+    const etkiHam = Number(res.data?.priceImpactPct ?? Number.NaN);
+    const sonuc: RaydiumQuote | null =
+      v !== null && Number.isFinite(v) && v > 0
+        ? { out: v, etkiPct: Number.isFinite(etkiHam) ? etkiHam / 100 : null }
+        : null;
+    if (sonuc === null) this.failures++;
+    this.cache.set(key, { at: Date.now(), sonuc });
+    return sonuc;
   }
 }

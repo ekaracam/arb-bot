@@ -63,6 +63,59 @@ const IMPLAUSIBLE_NET_PCT = 0.20;
 const NET_KAYIT_MAX = 500;
 
 /**
+ * Aşama 1'de kuyruğa alınacak azami HAM fark.
+ *
+ * ÖLÇÜLEN GEREKÇE: kuyruk ham farka göre sıralanıyor ve bozuk fiyatların ham
+ * farkı her zaman gerçek fırsatlarınkinden büyük — dolayısıyla tepeyi HER
+ * ZAMAN onlar işgal ediyor. 7 dakikalık ölçümde kâr hesabına ulaşan 12 çiftin
+ * 12'si de bozuk bir kaynaktan geliyordu ve net oranları %-17 ile %-99.95
+ * arasındaydı (`FIGHT|jupiter->raydium ×53 @ %-87.71`,
+ * `ANTFUN|raydium->kucoin ×22 @ %-99.95`). Yani doğrulama bütçesinin TAMAMI,
+ * yapısal olarak sinyale dönüşemeyecek adaylara gidiyordu.
+ *
+ * %20 üstü bir HAM fark neredeyse her zaman veri hatasıdır: ticker çakışması
+ * (aynı sembol, farklı varlık), ölü defter, ya da tek havuzun bozuk orta
+ * fiyatı. Motor bunu NET için zaten kabul ediyor (`IMPLAUSIBLE_NET_PCT`) ama
+ * orada yalnızca UYARI — çünkü o noktada aday zaten doğrulanmış, maliyeti
+ * ödenmiştir. Burada ise eleme doğru olan: doğrulama kapasitesi kıt ve bu
+ * adaylar onu tüketiyor.
+ *
+ * ELEME DEĞİL ÖNCELİK DÜŞÜRME — ve bu ayrım kritik. İlk denemede bu aday
+ * `continue` ile kuyruğa hiç alınmıyordu; o sürüm `IMPLAUSIBLE_NET_PCT`
+ * uyarısını ULAŞILAMAZ hale getirdi (var olan bir test bunu yakaladı). O uyarı
+ * kasten eleme değil: net %20'yi aşan bir sinyal, sebebi bilinmese bile
+ * GÖRÜNÜR kalmalı — ölçülmüş RWA %77.8 vakasının dersi bu.
+ *
+ * Sorun zaten adayın doğrulanması değildi, DİĞERLERİNİ AÇ BIRAKMASIYDI: kuyruk
+ * ham farka göre sıralı olduğu için bozuk fiyat tepeyi hep işgal ediyor.
+ * Önceliği dibe çekmek ikisini birden çözüyor — kapasite varsa doğrulanır ve
+ * uyarısıyla yayınlanır, kapasite yoksa ilk atılan o olur.
+ */
+const IMPLAUSIBLE_RAW_PCT = 0.20;
+
+/**
+ * Makul olmayan adayın önceliğinden düşülen sabit.
+ *
+ * Ham farktan çıkarılıyor, sabit bir değere EZİLMİYOR: böylece bu adaylar
+ * kendi aralarındaki sıralamayı korur ve hepsi birden eşitlenmiş olmaz.
+ * Değerin büyüklüğü, en kötü gerçek adayın bile her zaman üstte kalmasını
+ * garanti edecek kadar olmalı.
+ */
+const ONCELIK_CEZASI = 1_000_000;
+
+/**
+ * Aşama 2 quote'unda kabul edilen azami FİYAT ETKİSİ.
+ *
+ * Bunun üstü, havuzun işlem büyüklüğünü taşımadığı anlamına gelir. Eşik
+ * gevşek tutuldu (%5): kâr hesabı zaten etkiyi içeren gerçek miktarla
+ * yapılıyor, yani buradaki eleme DOĞRULUK için değil BÜTÇE için — aynı bozuk
+ * havuzu her turda yeniden sormayı bırakıyoruz. Daraltmak, yüksek farkı olan
+ * gerçek bir fırsatı da eleyebilir; ölçülen ZEUS vakasında etki %250
+ * mertebesinde, yani eşiğin yerini tartışmalı yapacak bir yakınlık yok.
+ */
+const MAX_FIYAT_ETKISI = 0.05;
+
+/**
  * `pickChain`'in sonucu — başarısızlıkta GEREKÇESİYLE birlikte.
  *
  * Gerekçe dönüş değerinde taşınıyor çünkü sayacı `pickChain`'in içinde
@@ -88,6 +141,11 @@ interface Candidate {
   buySlot: number;
   sellSlot: number;
   rawPct: number;
+  /**
+   * Kuyruk sırası. Normalde `rawPct`'e eşit; ham farkı makul olmayan adayda
+   * ondan çok düşük — böylece hem en son doğrulanır hem ilk atılan o olur.
+   */
+  oncelik: number;
 }
 
 /** Fırsatın hangi mekan tiplerini birleştirdiği. */
@@ -168,6 +226,11 @@ export class Scanner {
   private opportunityCount = 0;
   private rejectedByDepth = 0;
   private rejectedByTransfer = 0;
+  /** Ham farkı makul olmayan (muhtemel veri hatası) diye önceliği düşürülen aday. */
+  private makulDegilAday = 0;
+  /** İşlem büyüklüğünü taşımayan havuz yüzünden elenen bacak. */
+  private rejectedByImpact = 0;
+  private sonInceHavuz: string | null = null;
   private rejectedByStale = 0;
   /**
    * Kimlik çakışması yüzünden elenen adaylar (aynı ticker, farklı kontrat).
@@ -322,6 +385,9 @@ export class Scanner {
       opportunityCount: this.opportunityCount,
       rejectedByDepth: this.rejectedByDepth,
       rejectedByTransfer: this.rejectedByTransfer,
+      makulDegilAday: this.makulDegilAday,
+      rejectedByImpact: this.rejectedByImpact,
+      sonInceHavuz: this.sonInceHavuz,
       rejectedByAddress: this.rejectedByAddress,
       rejectedByStale: this.rejectedByStale,
       staleVenueSkips: this.staleVenueSkips,
@@ -431,6 +497,12 @@ export class Scanner {
       const rawPct = (bestBid - bestAsk) / bestAsk;
       if (rawPct < this.cfg.scan.prefilterPct) continue;
 
+      // Kuyruk sırası ham farka göre; bozuk fiyat her zaman en büyük ham farkı
+      // ürettiği için tepeyi o işgal eder. Önceliği dibe çekmek, aday hakkını
+      // kaybetmeden diğerlerinin önünü açar (bkz. IMPLAUSIBLE_RAW_PCT).
+      const makulDegil = rawPct > IMPLAUSIBLE_RAW_PCT;
+      const oncelik = makulDegil ? rawPct - ONCELIK_CEZASI : rawPct;
+
       // Çift başına doğrulama soğuması.
       //
       // `verifying` yalnızca UÇUŞTAKİ aynı adayı engelliyordu; doğrulama biter
@@ -456,6 +528,12 @@ export class Scanner {
       this.verifying.add(key);
 
       this.candidateCount++;
+      // Sayaç BURADA artıyor, ön filtrenin hemen sonrasında değil: orada
+      // artırınca soğumaya takılan tekrarlar da sayılıyordu ve `makulDegil`
+      // toplam aday sayısını AŞIYORDU (ölçüm: 80053 > 58068). Bir eleme
+      // sayacı, ait olduğu kümenin alt kümesi olmalı — yoksa panel kendi
+      // içinde çelişir ve okuyan kişi oranı yanlış hesaplar.
+      if (makulDegil) this.makulDegilAday++;
       this.lastQueuedAt[pairIndex] = now;
       this.queue.push({
         pair,
@@ -465,6 +543,7 @@ export class Scanner {
         buySlot: bestAskSlot,
         sellSlot: bestBidSlot,
         rawPct,
+        oncelik,
       });
 
       // Kuyruk taştıysa en zayıf adayı düşür: doğrulanmayı bekleyen bir aday
@@ -472,7 +551,7 @@ export class Scanner {
       if (this.queue.length > this.maxQueue) {
         let worstIdx = 0;
         for (let i = 1; i < this.queue.length; i++) {
-          if (this.queue[i]!.rawPct < this.queue[worstIdx]!.rawPct) worstIdx = i;
+          if (this.queue[i]!.oncelik < this.queue[worstIdx]!.oncelik) worstIdx = i;
         }
         const dropped = this.queue.splice(worstIdx, 1)[0]!;
         this.verifying.delete(`${dropped.pair}|${dropped.buyVenue}|${dropped.sellVenue}`);
@@ -495,7 +574,7 @@ export class Scanner {
       // kaybettiğimiz en değersiz aday olsun.
       let bestIdx = 0;
       for (let i = 1; i < this.queue.length; i++) {
-        if (this.queue[i]!.rawPct > this.queue[bestIdx]!.rawPct) bestIdx = i;
+        if (this.queue[i]!.oncelik > this.queue[bestIdx]!.oncelik) bestIdx = i;
       }
       const cand = this.queue.splice(bestIdx, 1)[0]!;
 
@@ -951,12 +1030,31 @@ export class Scanner {
         yon === 'buy'
           ? await this.legQuoter.buy(venue, symbol, miktar)
           : await this.legQuoter.sell(venue, symbol, miktar);
-      if (sonuc === null || !(sonuc > 0)) {
+      if (sonuc === null || !(sonuc.miktar > 0)) {
         this.dexQuoteEmpty++;
         return null;
       }
+
+      // İNCE HAVUZ — "rota yok"tan AYRI bir teşhis.
+      //
+      // Ölçülen örnek ZEUS: orta fiyatı Jupiter'le %2.5 uyumlu (fiyat kaynağı
+      // sağlam, referans filtresi haklı olarak geçiriyor) ama $500'lük quote
+      // birim fiyatı 3.5 KATINA çıkıyor. Havuz doğru fiyatlı, sadece o
+      // büyüklüğü taşımıyor. Kâr hesabı bunu zaten yakalıyordu (net %-99) ama
+      // eleme "derinlik yok" kovasına düşüyor ve panelde rotasızlıkla aynı
+      // görünüyordu — üstelik aynı bozuk havuz her turda yeniden sorulup
+      // doğrulama bütçesini yakıyordu.
+      //
+      // Etki değeri zaten elimizdeydi: iki quoter da döndürüyor, Jupiter'inki
+      // ayrıştırılıp atılıyordu.
+      if (sonuc.etkiPct !== null && sonuc.etkiPct > MAX_FIYAT_ETKISI) {
+        this.rejectedByImpact++;
+        this.sonInceHavuz = `${symbol}/${venue} etki %${(sonuc.etkiPct * 100).toFixed(1)}`;
+        return null;
+      }
+
       this.dexQuoteOk++;
-      return sonuc;
+      return sonuc.miktar;
     } catch (e) {
       this.dexQuoteError++;
       this.lastDexQuoteError = (e as Error).message;

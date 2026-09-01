@@ -26,12 +26,42 @@ import type {
 import { RateCounter } from '../../core/metrics.ts';
 import { guvenliAralik, type SolanaPriceSource } from './solana-price.ts';
 
+/**
+ * Referanstan azami sapma — ÖLÇÜLEREK seçildi, tahmin değil.
+ *
+ * 108 mint'te Raydium `mint/price` ile Jupiter `price/v3` karşılaştırıldı:
+ *
+ *   <%5: 98 token · %5–10: 1 · **%10–25: 0** · >%25: 9
+ *
+ * Sağlıklı küme ile bozuk küme arasında %6–%26 bandı BOŞ, yani eşik seçimi
+ * keyfi değil: bu bandın içindeki her değer bugün aynı sonucu verir. Ortası
+ * seçildi; %25 çok yakın olurdu, çünkü bozuk kümenin en alt üyesi %26.0
+ * (MET) ve ölçüm gürültüsüyle eşiğin altına düşebilirdi.
+ *
+ * Elenen 9 token, kuyruğu kirlettiği ölçülen tokenların ta kendisi:
+ * FIGHT %2630, GORK %547, W %255, ARX, ANTFUN, WLFI, LAYER, BNSOL, MET.
+ */
+const MAX_REFERANS_SAPMASI = 0.20;
+
 export interface SolanaFeedOptions {
   readonly venue: DexId;
   /** Aşama 1'in fiyat kaynağı — venue'yu belirleyen şey budur. */
   readonly priceSource: SolanaPriceSource;
   /** Geniş tarama periyodu (ms). Kaynağın limiti gerektirirse uzatılır. */
   readonly pollIntervalMs?: number;
+  /**
+   * Fiyatın karşılaştırılacağı REFERANS venue (aynı zincirde).
+   *
+   * Tek havuzun orta fiyatını yazan bir kaynak (Raydium `mint/price`) bozuk
+   * fiyat üretebiliyor; toplayıcı (Jupiter) rotayı tüm havuzlardan kurduğu
+   * için aynı hataya düşmüyor. Referans verilmezse kontrol yapılmaz —
+   * Jupiter'in kendisi referans olmadan çalışır.
+   */
+  readonly referansVenue?: DexId;
+  /** Referanstan bu orandan çok sapan fiyat store'a YAZILMAZ (0.20 = %20). */
+  readonly maxReferansSapmasi?: number;
+  /** Referans fiyatın azami yaşı (ms) — bayat referansla karar verilmez. */
+  readonly maxReferansYasiMs?: number;
 }
 
 export interface SolanaToken {
@@ -66,6 +96,10 @@ export class SolanaMidFeed implements Feed {
   private readonly rate = new RateCounter();
 
   private readonly source: SolanaPriceSource;
+  /** token indeksi → referans venue'daki slot (-1 = referans yok). */
+  private readonly referansSlot: Int32Array;
+  private readonly sapmaEsigi: number;
+  private readonly referansMaxYas: number;
 
   constructor(
     private readonly store: PriceStore,
@@ -74,6 +108,19 @@ export class SolanaMidFeed implements Feed {
   ) {
     this.venue = opts.venue;
     this.source = opts.priceSource;
+    this.sapmaEsigi = opts.maxReferansSapmasi ?? MAX_REFERANS_SAPMASI;
+    this.referansMaxYas = opts.maxReferansYasiMs ?? 30_000;
+
+    // Slotlar KURULUMDA çözülüyor: tick yolunda Map araması ya da string
+    // birleştirme yapılmaz (hot path kuralı). `resolveSlot` her (çift, venue)
+    // için sabit bir indeks döndürüyor, matris tam ayrıldığı için sonradan
+    // değişmez.
+    this.referansSlot = new Int32Array(tokens.length).fill(-1);
+    if (opts.referansVenue) {
+      for (let i = 0; i < tokens.length; i++) {
+        this.referansSlot[i] = store.resolveSlot(tokens[i]!.pair, opts.referansVenue);
+      }
+    }
   }
 
   /** Aşama 1'i besleyen kaynağın adı — sağlık panelinde gösterilir. */
@@ -118,10 +165,29 @@ export class SolanaMidFeed implements Feed {
 
       const now = Date.now();
       let written = 0;
+      let sapmaElenen = 0;
+      const elenenler: string[] = [];
 
-      for (const t of this.tokens) {
+      for (let i = 0; i < this.tokens.length; i++) {
+        const t = this.tokens[i]!;
         const price = fiyatlar.get(t.mint);
         if (!price || !(price > 0)) continue;
+
+        // REFERANS KONTROLÜ.
+        //
+        // Karar yalnızca TAZE bir referans varken veriliyor. Referans yoksa ya
+        // da bayatsa fiyat YAZILIR: kontrolü zorunlu kılmak, referans venue'su
+        // düştüğünde bu venue'yu de sessizce susturur — yani bir arıza iki
+        // venue'yu birden öldürür. "Bilinmiyor" burada "kötü" demek değil.
+        const rSlot = this.referansSlot[i]!;
+        if (rSlot >= 0 && now - this.store.recvTs(rSlot) <= this.referansMaxYas) {
+          const referans = this.store.ask(rSlot);
+          if (referans > 0 && Math.abs(price - referans) / referans > this.sapmaEsigi) {
+            sapmaElenen++;
+            if (elenenler.length < 6) elenenler.push(t.symbol);
+            continue;
+          }
+        }
 
         // Geniş tarama tek fiyat verir: bid=ask. Gerçek alım/satım farkı
         // yalnızca quote çağrısıyla öğrenilir, bu yüzden buradaki miktarları
@@ -134,7 +200,17 @@ export class SolanaMidFeed implements Feed {
       this.rate.tick(now);
       this.lastTickTs = now;
       this.state = written > 0 ? 'live' : 'failed';
-      if (written === 0) {
+      // Sıra ÖNEMLİ: eleme sebebi, "kaynak fiyat vermedi" sebebinden ÖNCE
+      // kontrol edilir. Ters sırada, tüm tokenlar filtreye takıldığında panel
+      // "kaynak hiçbir fiyat döndürmedi" diyordu — oysa kaynak döndürdü, biz
+      // eledik. Bu, botun tekrar eden hata sınıfının (veri ile arızayı
+      // karıştırmak) teşhis metnindeki karşılığı olurdu.
+      if (sapmaElenen > 0) {
+        this.lastError =
+          `${sapmaElenen} token referanstan >%${(this.sapmaEsigi * 100).toFixed(0)} saptığı ` +
+          `için yazılmadı (${elenenler.join(', ')}${sapmaElenen > elenenler.length ? '…' : ''})` +
+          (written === 0 ? ' — bu turda hiç fiyat yazılmadı' : '');
+      } else if (written === 0) {
         this.lastError = `${this.source.ad}: hiçbir token için fiyat döndürmedi`;
       } else {
         this.lastError = null;

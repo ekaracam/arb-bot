@@ -67,6 +67,9 @@ export interface RenderState {
     opportunityCount: number;
     rejectedByDepth: number;
     rejectedByTransfer: number;
+    makulDegilAday: number;
+    rejectedByImpact: number;
+    sonInceHavuz: string | null;
     rejectedByAddress: number;
     rejectedByStale: number;
     staleVenueSkips: number;
@@ -290,6 +293,14 @@ export class Renderer {
         `│ sinyal ${C.reset}${C.bold}${sc.opportunityCount}${C.reset}${C.dim} ` +
         `│ aktif ${C.reset}${C.bold}${s.opportunities.length}${C.reset}${C.dim} ` +
         `│ elenen: derinlik ${sc.rejectedByDepth} transfer ${sc.rejectedByTransfer} ` +
+        // Ham farkı makul olmayan aday KUYRUĞA HİÇ ALINMIYOR — ölçüldü ki
+        // doğrulama bütçesinin tamamını bunlar yiyordu. Sessiz eleme bu botta
+        // eleme yapmamaktan tehlikeli, o yüzden sayaç panelde.
+        (sc.makulDegilAday > 0 ? `makul değil ${sc.makulDegilAday} ` : '') +
+        // İnce havuz "rota yok"tan ayrı basılıyor: ilki havuzun işlem
+        // büyüklüğünü taşımaması, ikincisi hiç havuz olmaması. Aynı kovaya
+        // konsalar, token silmeye yönelten yanlış teşhis üretirdi.
+        (sc.rejectedByImpact > 0 ? `ince havuz ${sc.rejectedByImpact} ` : '') +
         // Kimlik çakışması yalnızca gerçekleştiğinde yazılıyor: sıfır olması
         // normal durumdur ve her satırda "kimlik 0" göstermek diğer sayaçları
         // gözden kaçırılır hale getirirdi. Sıfırdan büyükse ayrı renkte,

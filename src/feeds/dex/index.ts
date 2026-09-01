@@ -200,7 +200,17 @@ export function createDexFeeds(
   // seçer; raydium'unki tanımı gereği Raydium'dur. İkisini tek ayara bağlamak,
   // "raydium venue'sü geckoterminal fiyatı yazıyor" gibi kendi kimliğine
   // aykırı bir duruma yol açardı.
-  const solanaVenues: { venue: DexId; kaynak: () => SolanaPriceSource }[] = [
+  //
+  // `referansVenue`: Raydium tek havuzun ORTA fiyatını yazıyor ve ölçüldü ki
+  // 108 mint'in 9'unda Jupiter'den %26–%2630 sapıyor. O sapık fiyatlar devasa
+  // ham fark üretip doğrulama kuyruğunun tepesini işgal ediyordu. Jupiter
+  // toplayıcı olduğu için referans odur; tersi (jupiter'i raydium'la
+  // doğrulamak) daha kötü bir kaynağa güvenmek olurdu.
+  const solanaVenues: {
+    venue: DexId;
+    kaynak: () => SolanaPriceSource;
+    referansVenue?: DexId;
+  }[] = [
     {
       venue: 'jupiter',
       kaynak: () =>
@@ -209,7 +219,7 @@ export function createDexFeeds(
           process.env['JUPITER_API_KEY'] ?? null,
         ),
     },
-    { venue: 'raydium', kaynak: () => new RaydiumPriceSource() },
+    { venue: 'raydium', kaynak: () => new RaydiumPriceSource(), referansVenue: 'jupiter' },
   ];
 
   for (const sv of solanaVenues) {
@@ -235,7 +245,12 @@ export function createDexFeeds(
     out.push({
       feed:
         tokens.length > 0
-          ? new SolanaMidFeed(store, tokens, { venue: sv.venue, priceSource: sv.kaynak() })
+          ? new SolanaMidFeed(store, tokens, {
+              venue: sv.venue,
+              priceSource: sv.kaynak(),
+              ...(sv.referansVenue ? { referansVenue: sv.referansVenue } : {}),
+              maxReferansYasiMs: cfg.scan.maxDexPriceAgeMs,
+            })
           : null,
       venue: sv.venue,
       skipReason: tokens.length === 0 ? 'eşleşen token yok' : null,
