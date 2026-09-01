@@ -59,6 +59,9 @@ const SUSPICIOUS_PERSISTENCE_MS = 45_000;
  */
 const IMPLAUSIBLE_NET_PCT = 0.20;
 
+/** Teşhis tablosunun üst sınırı — araç bellek sızdırmamalı. */
+const NET_KAYIT_MAX = 500;
+
 /**
  * `pickChain`'in sonucu — başarısızlıkta GEREKÇESİYLE birlikte.
  *
@@ -204,6 +207,21 @@ export class Scanner {
   private netHesaplanan = 0;
   private enIyiNetPct = Number.NEGATIVE_INFINITY;
 
+  /**
+   * Kâr hesabına ULAŞAN çiftlerin dökümü: "COIN|al->sat" → kaç kez, en iyi net.
+   *
+   * NEDEN VAR: eşiği geçmeyen aday bugüne kadar hiçbir iz bırakmadan
+   * siliniyordu, dolayısıyla "doğrulama bütçesi nereye gidiyor" sorusunun
+   * cevabı yoktu. Ölçüm bunu zorunlu kıldı: 5 dakikada 39901 adayın yalnızca
+   * 117'si kâr hesabına ulaştı ve görülen en iyi net %-17.6 idi — yani boru
+   * hattının sonuna gelen adaylar eşiğin BİRAZ altında değil, yapısal olarak
+   * zararda. Hangi çiftlerin bu kapasiteyi yaktığını bilmeden ne eşik ne de
+   * ön filtre ayarlanabilir.
+   *
+   * Tablo sınırlı: teşhis aracı bellek sızdırmamalı.
+   */
+  private readonly netKayit = new Map<string, { adet: number; enIyi: number }>();
+
   private dexQuoteTried = 0;
   private dexQuoteOk = 0;
   private dexQuoteEmpty = 0;
@@ -314,6 +332,11 @@ export class Scanner {
       queueDepth: this.queue.length,
       netHesaplanan: this.netHesaplanan,
       enIyiNetPct: this.enIyiNetPct,
+      /** Kâr hesabına en çok ulaşan çiftler — en fazla 12 satır. */
+      netKayit: [...this.netKayit.entries()]
+        .sort((a, b) => b[1].adet - a[1].adet)
+        .slice(0, 12)
+        .map(([anahtar, v]) => ({ anahtar, adet: v.adet, enIyi: v.enIyi })),
       dexQuoteTried: this.dexQuoteTried,
       dexQuoteOk: this.dexQuoteOk,
       dexQuoteEmpty: this.dexQuoteEmpty,
@@ -649,6 +672,15 @@ export class Scanner {
     // kadar yaklaştık" sorusunun tek cevabı bu.
     this.netHesaplanan++;
     if (netPct > this.enIyiNetPct) this.enIyiNetPct = netPct;
+
+    const kayitAnahtari = `${coin}|${c.buyVenue}->${c.sellVenue}`;
+    const kayit = this.netKayit.get(kayitAnahtari);
+    if (kayit) {
+      kayit.adet++;
+      if (netPct > kayit.enIyi) kayit.enIyi = netPct;
+    } else if (this.netKayit.size < NET_KAYIT_MAX) {
+      this.netKayit.set(kayitAnahtari, { adet: 1, enIyi: netPct });
+    }
 
     if (netPct < this.cfg.scan.minNetPct) return;
 

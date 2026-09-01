@@ -510,6 +510,15 @@ async function main(): Promise<void> {
               : '') +
             (bozuk.length > 0 ? ` FEED_SORUN=${bozuk.join(',')}` : ''),
         );
+        // Doğrulama bütçesini kimin yaktığı — "0 sinyal" teşhisinin ikinci
+        // yarısı. Toplam sayı nereye gittiğini söylemiyor, bu döküm söylüyor.
+        if (s.netKayit.length > 0) {
+          runLog(
+            `NET_DOKUM ${s.netKayit
+              .map((k) => `${k.anahtar}×${k.adet}@%${(k.enIyi * 100).toFixed(2)}`)
+              .join(' · ')}`,
+          );
+        }
       }, 60_000)
     : null;
 
