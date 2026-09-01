@@ -1,0 +1,11 @@
+{
+  "$aciklama": [
+    "Botun otomatik keşfinin ELEDİĞİ ama senin kesinlikle taranmasını istediğin coinler.",
+    "sembol  : ticker (zorunlu). Stablecoin/kaldıraçlı elemesi ve \"en az iki borsa\" kuralı bu coin için uygulanmaz.",
+    "quotes  : USDT dışında kabul edilecek ek quote birimleri (ör. [\"USD\"]). Boş bırakılabilir.",
+    "dex     : DEX bacağı için token bilgisi. tokens.json ile aynı zincirde çelişirse bot başlamaz.",
+    "not     : neden eklediğin. Aylar sonra okuyacak olan sensin.",
+    "Girdinin GERÇEKTEN işe yarayıp yaramadığını gör: npm run izle"
+  ],
+  "coinler": []
+}

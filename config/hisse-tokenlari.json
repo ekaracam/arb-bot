@@ -1,0 +1,29 @@
+{
+  "$aciklama": [
+    "Tokenlaştırılmış hisse senetleri (xStocks / Backed Finance).",
+    "Bu semboller CEX bacağında EK BİR KESİNTİ taşıyor ve bu kesinti borsanın",
+    "normal taker komisyonuna DAHİL DEĞİL — ölçüldü: Gate ve MEXC bu çiftlere",
+    "normal çiftlerle birebir aynı taker oranını uyguluyor (%0.2 ve %0.05).",
+    "",
+    "Oran .env'de: HISSE_TOKEN_EK_PCT (yüzde olarak yazılır).",
+    "",
+    "Liste ELLE tutulur, kalıpla türetilmez. Sondaki 'X' harfine bakan bir kural",
+    "SPX, ARX, MPLX, NATIX ve GMX'i de hisse sanardı — kimlik kuralının aynısı:",
+    "bir varlığın kimliği ticker'ın şekli değildir."
+  ],
+  "semboller": [
+    "AAPLX",
+    "AMZNX",
+    "COINX",
+    "CRCLX",
+    "GOOGLX",
+    "HOODX",
+    "MCDX",
+    "METAX",
+    "NVDAX",
+    "SLX",
+    "SPCXX",
+    "SPYX",
+    "TSLAX"
+  ]
+}

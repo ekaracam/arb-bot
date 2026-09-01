@@ -1,0 +1,18 @@
+{
+  "solana": {
+    "enabled": true,
+    "rpcUrl": "https://api.mainnet-beta.solana.com",
+    "gasCostUsd": 0.02
+  },
+  "base": {
+    "enabled": true,
+    "_rpcNot": "mainnet.base.org ÖLÇÜLDÜ ve kullanılamaz: aynı multicall arka arkaya farklı sonuç veriyor, 10 turun 7'sinde hiçbir token fiyatlanamadı. publicnode 25 tur / 75 sn kesintisiz yükte 0 başarısız, 86 ms. Değiştirmeden önce ölç.",
+    "rpcUrl": "https://base-rpc.publicnode.com",
+    "gasCostUsd": 0.05
+  },
+  "arbitrum": {
+    "enabled": true,
+    "rpcUrl": "https://arb1.arbitrum.io/rpc",
+    "gasCostUsd": 0.08
+  }
+}

@@ -1,0 +1,30 @@
+node_modules/
+dist/
+data/
+.env
+# .env'in HER türevi — yedek, yerel, örnek DIŞINDAKİ her şey.
+# `.env` tek başına yazıldığında `.env.yedek-1716` gibi kopyalar KAPSANMIYOR
+# ve o dosyalar gerçek API anahtarı taşıyor.
+.env.*
+!.env.example
+# `.env.*` sondaki noktadan sonrasına bakar; editör/kabuk yedekleri o kalıba
+# UYMAZ (`.env~`, `.env.save`, `env.local`, `.env kopya`).
+.env~
+.env.*~
+*.env
+env.local
+*.log
+
+# Kimlik dosyaları. Bu depoda bugün yok; kalıbın var olma sebebi, bir gün
+# elle indirilen bir anahtar dosyasının sessizce sahnelenmemesi.
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editör ve işletim sistemi artıkları. Tehlikeli değiller ama `git add -A`
+# ile sürekli geri geldikleri için gürültü üretirler.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

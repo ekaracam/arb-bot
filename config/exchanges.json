@@ -1,0 +1,46 @@
+{
+  "binance": {
+    "enabled": true,
+    "fees": { "taker": 0.001, "maker": 0.001 },
+    "quotes": ["USDT"],
+    "transferInfoPublic": false
+  },
+  "bybit": {
+    "enabled": true,
+    "fees": { "taker": 0.001, "maker": 0.001 },
+    "quotes": ["USDT"],
+    "transferInfoPublic": false
+  },
+  "okx": {
+    "enabled": true,
+    "fees": { "taker": 0.001, "maker": 0.0008 },
+    "quotes": ["USDT"],
+    "transferInfoPublic": false
+  },
+  "gate": {
+    "enabled": true,
+    "fees": { "taker": 0.002, "maker": 0.002 },
+    "quotes": ["USDT"],
+    "transferInfoPublic": true
+  },
+  "mexc": {
+    "enabled": true,
+    "fees": { "taker": 0.0005, "maker": 0.0 },
+    "quotes": ["USDT"],
+    "transferInfoPublic": false
+  },
+  "kucoin": {
+    "enabled": true,
+    "fees": { "taker": 0.001, "maker": 0.001 },
+    "quotes": ["USDT"],
+    "transferInfoPublic": true
+  },
+  "kraken": {
+    "enabled": true,
+    "_notFees": "Kraken'in en düşük hacim kademesi: taker %0.40, maker %0.25. Buradaki değerler o kademe — hacmin artarsa düşür, ama YÜKSEK tutmak güvenli yön: komisyonu olduğundan düşük yazmak sahte sinyal üretir.",
+    "fees": { "taker": 0.004, "maker": 0.0025 },
+    "quotes": ["USDT"],
+    "_notTransfer": "Çekim durumu yalnızca imzalı endpoint'te; anahtar eklenmediği sürece Kraken bacağı 'doğrulanmamış' uyarısı taşır.",
+    "transferInfoPublic": false
+  }
+}
