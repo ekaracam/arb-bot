@@ -843,8 +843,30 @@ istemeyen alternatifler 25 tur / 75 sn kesintisiz yükte denendi:
 | mainnet.base.org | 6 turun 4'ü SIFIR | — |
 | base.llamarpc.com, base.meowrpc.com | 6 turun 6'sı SIFIR | — |
 
-Varsayılan bu yüzden `config/chains.json`'da publicnode. `arb1.arbitrum.io/rpc`
-ölçümde sorunsuzdu (10/10 tur), değiştirmeye gerek yok.
+Varsayılan bu yüzden `config/chains.json`'da publicnode.
+
+**Arbitrum'da AYNI ders ikinci kez öğrenildi.** Bir dönem burada
+"`arb1.arbitrum.io/rpc` ölçümde sorunsuzdu (10/10 tur), değiştirmeye gerek yok"
+yazıyordu. O ölçüm Arbitrum'da TEK venue (camelot) ve tek adımlı rota varken
+yapılmıştı; UniV3 ve 2 adımlı WETH rotası eklendiğinden beri istek sayısı
+katlandı ve uç nokta 429 vermeye başladı — `camelot` canlı koşuda `failed`
+sonra `idle` durumuna düştü, yani Arbitrum bacağı sessizce öldü. Yeniden
+ölçüm (40 istek, ~5/sn):
+
+| uç nokta | ok | medyan |
+|---|---|---|
+| **arbitrum-one-rpc.publicnode.com** | **40/40** | **53 ms** |
+| arb-pokt.nodies.app | 40/40 | 56 ms |
+| arbitrum.drpc.org | 40/40 | 77 ms |
+| 1rpc.io/arb | 39/40 | 173 ms |
+| arb1.arbitrum.io/rpc | 35/40 (5×429) | 162 ms |
+| arbitrum.llamarpc.com | 0/40 | timeout |
+
+Ders şu: **RPC ölçümü kapsam değiştiğinde geçersizleşir.** Bir venue ya da rota
+eklemek istek sayısını çarpımsal büyütüyor (bkz. "Base'de istek hacmi
+ÇARPIMSAL büyüyor"), dolayısıyla "bu uç nokta yeterliydi" cümlesinin ömrü, o
+zincirin kapsamı sabit kaldığı sürecedir. `arbitrum.drpc.org` da not düşmeye
+değer: önceki ölçümde ÖLÜ görünüyordu, bugün 40/40.
 
 **Multicall'ı bölmek ZORUNLU.** Multicall3'ün `aggregate3`'ü bütün çağrıları tek
 `eth_call` ve **tek gas bütçesiyle** çalıştırır; havuzu olmayan bir token'ın quoter

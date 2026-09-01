@@ -12,7 +12,8 @@
   },
   "arbitrum": {
     "enabled": true,
-    "rpcUrl": "https://arb1.arbitrum.io/rpc",
+    "_rpcNot": "arb1.arbitrum.io/rpc ÖLÇÜLDÜ ve artık yetmiyor: 40 istekte 5×429, camelot feed'i failed→idle'a düştü. Eski 'sorunsuz' ölçümü Arbitrum'da tek venue ve tek adımlı rota varken yapılmıştı; UniV3 ve 2 adımlı rota eklendiğinden beri istek sayısı katlandı. 40/40: publicnode 53 ms, arb-pokt 56 ms, drpc 77 ms. llamarpc 0/40 (timeout). Değiştirmeden önce ölç.",
+    "rpcUrl": "https://arbitrum-one-rpc.publicnode.com",
     "gasCostUsd": 0.08
   }
 }
