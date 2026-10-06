@@ -148,6 +148,26 @@ const MAX_FIYAT_ETKISI = 0.05;
 const INCE_HAVUZ_TTL_MS = 10 * 60_000;
 
 /**
+ * Sakin CEX defterinin Aşama 1'de taze sayılabileceği üst sınır (ms).
+ *
+ * Binance bookTicker, OKX, Gate, KuCoin ve Kraken L1'i yalnızca DEĞİŞİNCE
+ * yayınlıyor. Ölçüldü (3 dk): bu beş borsada Aşama 1 okumalarının
+ * **%37–54'ü** 3 sn'lik eşikle bayat sayılıp atılıyordu (bybit %8, mexc %0 —
+ * onlar periyodik yayınlıyor). Yani farkın en uzun açık kaldığı sakin
+ * coinlerin yarısı hiç taranmıyordu.
+ *
+ * Sakin slot ancak venue'nun kendisi veri AKITIYORSA taze sayılır (başka bir
+ * sembolüne son `maxPriceAgeMs` içinde yazılmış olmalı) — bağlantı ölmüşse
+ * bütün slotları zaten bayattır. Sınır sonlu: tek sembolün aboneliği sessizce
+ * düşerse L1 sonsuza kadar "sakin" görünürdü.
+ *
+ * GÜVENLİK Aşama 2'de: L1'i `maxPriceAgeMs`'ten eski olan CEX bacağı L1'den
+ * fiyatlanmaz, REST defteri ZORUNLU çekilir. Bu sınır yalnızca hangi çiftin
+ * doğrulanacağını seçer, kâr hesabına bayat fiyat girmez.
+ */
+const SAKIN_DEFTER_MAX_MS = 60_000;
+
+/**
  * `pickChain`'in sonucu — başarısızlıkta GEREKÇESİYLE birlikte.
  *
  * Gerekçe dönüş değerinde taşınıyor çünkü sayacı `pickChain`'in içinde
@@ -286,6 +306,14 @@ export class Scanner {
    */
   private rejectedByAddress = 0;
   private staleVenueSkips = 0;
+  /**
+   * Venue başına Aşama 1 okuması: kaç kez taze, kaç kez bayat bulundu.
+   * `staleVenueSkips` toplamı HANGİ borsanın bayatladığını söylemiyordu;
+   * "değişince yayınlayan" feed'lerde sakin defterin taranmadan düşmesi
+   * ancak venue bazında görülebilir. Tipli dizi — hot path'te allocation yok.
+   */
+  private readonly venueTaze: Float64Array;
+  private readonly venueBayat: Float64Array;
   private skippedByCooldown = 0;
   /**
    * DEX bacaklı adayın, DEX fiyatı son kuyruğa alınmadan beri YENİDEN
@@ -417,6 +445,8 @@ export class Scanner {
     this.venueMaxAge = new Float64Array(store.venueCount);
     this.venueIsDex = new Uint8Array(store.venueCount);
     this.venueQuoteIle = new Uint8Array(store.venueCount);
+    this.venueTaze = new Float64Array(store.venueCount);
+    this.venueBayat = new Float64Array(store.venueCount);
     for (let v = 0; v < store.venueCount; v++) {
       const id = store.venueAt(v);
       const dex = Boolean(id && isDex(id));
@@ -469,6 +499,17 @@ export class Scanner {
       rejectedByAddress: this.rejectedByAddress,
       rejectedByStale: this.rejectedByStale,
       staleVenueSkips: this.staleVenueSkips,
+      /** Venue başına Aşama 1'de bayat bulunan okuma oranı (0–1). */
+      venueBayatOrani: Array.from({ length: this.store.venueCount }, (_, v) => {
+        const taze = this.venueTaze[v]!;
+        const bayat = this.venueBayat[v]!;
+        const toplam = taze + bayat;
+        return {
+          venue: this.store.venueAt(v) ?? `#${v}`,
+          oran: toplam > 0 ? bayat / toplam : 0,
+          toplam,
+        };
+      }),
       skippedByCooldown: this.skippedByCooldown,
       skippedByDexUnchanged: this.skippedByDexUnchanged,
       persistentCount: this.persistentCount,
@@ -540,11 +581,13 @@ export class Scanner {
         const slot = base + v;
         const recv = this.store.recvTs(slot);
         if (recv === 0) continue;
-        if (now - recv > this.venueMaxAge[v]!) {
+        if (!this.slotTaze(recv, v, now)) {
           staleSkips++;
+          this.venueBayat[v]!++;
           continue;
         }
         usable++;
+        this.venueTaze[v]!++;
 
         const ask = this.store.ask(slot);
         if (ask > 0 && ask < bestAsk) {
@@ -754,9 +797,14 @@ export class Scanner {
 
     const buyRecv = this.store.recvTs(c.buySlot);
     const sellRecv = this.store.recvTs(c.sellSlot);
-    const buyAge = now - buyRecv;
-    const sellAge = now - sellRecv;
-    const worstAge = Math.max(buyAge, sellAge);
+    // Sakin CEX defteri (bkz. `SAKIN_DEFTER_MAX_MS`) Aşama 1'den geçmiş
+    // olabilir; o bacağın L1'i kâr hesabına GİRMEZ — aşağıda REST defteri
+    // zorunlu çekilir. Kaynak zamanı o durumda defterin çekildiği andır ve
+    // sonraki bayatlık ölçüleri, uyarı ve yayın yaşı onu kullanır.
+    const buyL1Taze = now - buyRecv <= this.maxAgeFor(c.buySlot);
+    const sellL1Taze = now - sellRecv <= this.maxAgeFor(c.sellSlot);
+    let buyKaynakTs = buyRecv;
+    let sellKaynakTs = sellRecv;
 
     // Bayatlık eşiği bacak BAŞINA, venue türüne göre uygulanır — Aşama 1'deki
     // kuralın aynısı (`venueMaxAge`).
@@ -773,7 +821,11 @@ export class Scanner {
     //
     // Sessizliği ayrıca kötüydü: eleme `rejectedByStale`'e yazıldığı için
     // panelde gerçek CEX bayatlığından ayırt edilemiyordu.
-    if (buyAge > this.maxAgeFor(c.buySlot) || sellAge > this.maxAgeFor(c.sellSlot)) {
+    const venueCount = this.store.venueCount;
+    if (
+      !this.slotTaze(buyRecv, c.buySlot % venueCount, now) ||
+      !this.slotTaze(sellRecv, c.sellSlot % venueCount, now)
+    ) {
       this.rejectedByStale++;
       return;
     }
@@ -811,7 +863,9 @@ export class Scanner {
     // --- Alış tarafı ------------------------------------------------------
     // L1 derinliği talebi karşılıyorsa REST'e hiç gitmeyiz: hem hızlı hem
     // rate-limit dostu. Karşılamıyorsa gerçek defteri çekeriz.
-    let buyFill = l1Fill(bestAsk, askQty, neededBase);
+    // L1 sakin defterden geliyorsa (eşikten eski) miktarı 0 sayılır: l1Fill
+    // tamamlanmaz ve REST defteri zorunlu çekilir.
+    let buyFill = l1Fill(bestAsk, buyL1Taze ? askQty : 0, neededBase);
     // DEX'te "defter" yok: quoter zaten slippage dahil gerçekleşecek fiyatı
     // verdiği için L1 kaydı doğrudan kullanılabilir, REST derinliği çekilmez.
     if (!buyFill.complete && isCex(c.buyVenue)) {
@@ -832,6 +886,7 @@ export class Scanner {
         return;
       }
       buyFill = buyWithQuote(book.asks, etkinTradeSize);
+      buyKaynakTs = book.ts;
       if (!buyFill.complete) {
         // Defterin tamamı bile talebi karşılamıyor — bu boyutta işlem yapılamaz.
         this.rejectedByDepth++;
@@ -864,7 +919,7 @@ export class Scanner {
     }
 
     // --- Satış tarafı -----------------------------------------------------
-    let sellFill = l1Fill(bestBid, bidQty, baseBought);
+    let sellFill = l1Fill(bestBid, sellL1Taze ? bidQty : 0, baseBought);
     if (!sellFill.complete && isCex(c.sellVenue)) {
       const symbol = this.registry.venuesFor(c.pair).get(c.sellVenue);
       if (!symbol) return;
@@ -879,6 +934,7 @@ export class Scanner {
         return;
       }
       sellFill = sellBase(book.bids, baseBought);
+      sellKaynakTs = book.ts;
       if (!sellFill.complete) {
         this.rejectedByDepth++;
         return;
@@ -898,12 +954,13 @@ export class Scanner {
     // kovasında bekleyebilir (+4 sn timeout), DEX quote'u Jupiter kovasında
     // (1/sn) — başta taze olan bacak buraya gelene kadar eşiği aşmış olabilir
     // ve eski kod bunu ne eliyor ne "fiyat yaşı" uyarısına yazıyordu. Ölçü,
-    // başta okunan `recvTs`'lerdir: slot sonradan tazelense bile kullandığımız
-    // DEĞERLER o andakiler.
+    // kullanılan DEĞERLERİN zamanıdır: L1'den fiyatlanan bacakta başta okunan
+    // `recvTs` (slot sonradan tazelense bile), REST defterinden fiyatlananda
+    // defterin çekildiği an.
     const araNow = Date.now();
     if (
-      araNow - buyRecv > this.maxAgeFor(c.buySlot) ||
-      araNow - sellRecv > this.maxAgeFor(c.sellSlot)
+      araNow - buyKaynakTs > this.maxAgeFor(c.buySlot) ||
+      araNow - sellKaynakTs > this.maxAgeFor(c.sellSlot)
     ) {
       this.rejectedByStale++;
       return;
@@ -1075,6 +1132,10 @@ export class Scanner {
     // (1.5 sn) kullanmak, DEX bacağı 30 sn'ye kadar taze sayılırken her
     // CEX↔DEX fırsatına "fiyat yaşı" uyarısı iliştirirdi — her sinyalde çıkan
     // uyarı bilgi taşımaz, yalnızca gerçek uyarıları gürültüye boğar.
+    // Yaş, kullanılan değerin kaynağına göre (REST defteri çekildiyse o an).
+    const buyAge = Math.max(0, now - buyKaynakTs);
+    const sellAge = Math.max(0, now - sellKaynakTs);
+    const worstAge = Math.max(buyAge, sellAge);
     if (buyAge > this.maxAgeFor(c.buySlot) / 2 || sellAge > this.maxAgeFor(c.sellSlot) / 2) {
       warnings.push(`fiyat yaşı ${worstAge}ms`);
     }
@@ -1126,7 +1187,7 @@ export class Scanner {
       bestPrice: bestAsk,
       qty: baseBought,
       feeQuote: buyFee,
-      ageMs: yayinAni - buyRecv,
+      ageMs: yayinAni - buyKaynakTs,
     };
 
     const sellLeg: Leg = {
@@ -1137,7 +1198,7 @@ export class Scanner {
       bestPrice: bestBid,
       qty: baseAfterWithdraw,
       feeQuote: sellFee,
-      ageMs: yayinAni - sellRecv,
+      ageMs: yayinAni - sellKaynakTs,
     };
 
     const opp: Opportunity = {
@@ -1310,6 +1371,20 @@ export class Scanner {
    */
   private maxAgeFor(slot: number): number {
     return this.venueMaxAge[slot % this.store.venueCount]!;
+  }
+
+  /**
+   * Slot Aşama 1/2 seçimine girebilir mi. HOT PATH — allocation yok.
+   *
+   * Kendi eşiğinin içindeyse tazedir. Değilse yalnızca CEX'te ve sakin defter
+   * kuralıyla (bkz. `SAKIN_DEFTER_MAX_MS`): venue başka sembollere yazmaya
+   * devam ediyorsa bu sembolün L1'i değişmemiş demektir, kaybolmuş değil.
+   */
+  private slotTaze(recv: number, v: number, now: number): boolean {
+    const yas = now - recv;
+    if (yas <= this.venueMaxAge[v]!) return true;
+    if (this.venueIsDex[v] === 1 || yas > SAKIN_DEFTER_MAX_MS) return false;
+    return now - this.store.venueLastWriteTs(v) <= this.venueMaxAge[v]!;
   }
 
   /**

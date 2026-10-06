@@ -682,6 +682,76 @@ test('yeterli taze borsa kaldıysa çift elenmez ama atlanan okuma sayılır', a
   assert.equal(r.emitted[0]!.sell.venue, 'kucoin');
 });
 
+// Sakin defter: "değişince yayınlayan" borsada L1 değişmediği için yaşlanan
+// slot, borsa başka sembollere yazmaya devam ediyorsa taranır — ama kâr
+// hesabına L1 değil zorunlu çekilen REST defteri girer.
+const DIGER = 'DIGER/USDT' as PairKey;
+
+function sakinRig(): Rig {
+  return rig({ pairs: [PAIR, DIGER], cfg: { maxPriceAgeMs: 1000 } });
+}
+
+/** Borsanın BAŞKA bir sembolüne taze yazım — venue veri akıtıyor. */
+function venueCanli(r: Rig, venue: VenueId): void {
+  const now = Date.now();
+  r.store.write(r.store.resolveSlot(DIGER, venue), 5, 1e6, 5.01, 1e6, now, now);
+}
+
+test('sakin defter: borsa canlıysa aday üretir ve REST defteri ZORUNLU çekilir', async () => {
+  const r = sakinRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6, 10_000); // L1 10 sn'dir değişmedi
+  venueCanli(r, 'binance');
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6, 0);
+  r.depth.set('binance', PAIR, { asks: [[1.0, 1e6]] });
+
+  await r.run();
+
+  // L1 miktarı talebi karşılasa da bayat L1 kâra girmez.
+  assert.equal(r.depth.calls.length, 1);
+  assert.equal(r.depth.calls[0]!.venue, 'binance');
+  assert.equal(r.emitted.length, 1);
+  assert.equal(r.scanner.stats.rejectedByStale, 0);
+  // Yayın yaşı kullanılan değerin (REST defteri) yaşıdır, L1'in değil.
+  assert.ok(r.emitted[0]!.buy.ageMs < 1000, `yaş ${r.emitted[0]!.buy.ageMs}`);
+});
+
+test('sakin defter: REST defteri farkı kapatmışsa sinyal üretilmez', async () => {
+  const r = sakinRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6, 10_000);
+  venueCanli(r, 'binance');
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6, 0);
+  // Gerçek defter artık 1.06'dan satıyor — sakin görünen L1 yanlıştı.
+  r.depth.set('binance', PAIR, { asks: [[1.06, 1e6]] });
+
+  await r.run();
+
+  assert.equal(r.depth.calls.length, 1);
+  assert.equal(r.emitted.length, 0);
+});
+
+test('sakin defter: borsa hiç veri akıtmıyorsa bayat sayılır', async () => {
+  const r = sakinRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6, 10_000);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6, 0);
+
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 0);
+  assert.equal(r.scanner.stats.rejectedByStale, 1);
+});
+
+test('sakin defter: üst sınırı (60 sn) aşan L1 borsa canlı olsa da bayattır', async () => {
+  const r = sakinRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6, 61_000);
+  venueCanli(r, 'binance');
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6, 0);
+
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 0);
+  assert.equal(r.depth.calls.length, 0);
+});
+
 test('hiç veri yazılmamış borsa bayat sayılmaz', async () => {
   // recvTs=0 "hiç tick gelmedi" demek; bunu bayatlık olarak saymak
   // başlangıçta sayaçları şişirirdi.

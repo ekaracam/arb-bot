@@ -1310,6 +1310,17 @@ Bunlar süs değil, gözlenen hata modlarına verilmiş yanıtlar — kaldırmad
   path'te tek indeksli okuma, dallanma yok. Gevşetmek güvenli çünkü Aşama 1
   fiyatı kâr hesabına girmez, yalnızca doğrulanacak çifti seçer.
 
+  **Sakin CEX defteri bayat DEĞİLDİR** (`SAKIN_DEFTER_MAX_MS`, 60 sn).
+  Binance bookTicker, OKX, Gate, KuCoin ve Kraken L1'i yalnızca DEĞİŞİNCE
+  yayınlıyor; 3 sn'lik eşik sakin coinin L1'ini bayat sayıyordu. Ölçüldü
+  (venue bazlı `bayatOran`, koşu günlüğünde): bu beş borsada Aşama 1
+  okumalarının **%37–56'sı** atılıyordu — farkın en uzun açık kaldığı coinler.
+  Şimdi slot, venue başka sembollerine son 3 sn içinde yazmışsa
+  (`PriceStore.venueLastWriteTs`) 60 sn'ye kadar taranır; sonuç %0–8.
+  **Güvenlik Aşama 2'de:** L1'i eşikten eski CEX bacağı `l1Fill`'e girmez,
+  REST defteri ZORUNLU çekilir ve bacağın yaşı/bayatlığı defterin çekildiği
+  andan ölçülür — kâr hesabına bayat L1 girmez. Dört testle sabit.
+
   **İKİ AŞAMA DA aynı tablodan okumak zorunda** (`maxAgeFor`). Düzeltme uzun
   süre yalnızca Aşama 1'e uygulanmıştı: `verify()` düz `maxPriceAgeMs`'i (3 sn)
   iki bacağa birden dayatıyordu, yani Aşama 1'in kabul ettiği DEX adayı bir
@@ -1588,8 +1599,12 @@ ile her 429'u ikinci istekle ödüllendiriyordu. Şimdi:
 - Kova ve `perMinute` TEK tablodan türer (`JUPITER_KADEMELERI`, jupiter.ts);
   anahtarlı kademe `.env`'de `JUPITER_TIER` (`free` varsayılan | `developer`),
   tek doğrulama yeri `loadConfig()` → `cfg.jupiterTier`; tanınmayan değer
-  başlangıçta hata. Anahtarsız periyot 134 token'da **~23 sn** (eski
+  başlangıçta hata. Anahtarsız periyot 134 token'da **~27 sn** (eski
   11.4 sn), 30 sn'lik bütçenin içinde; aşarsa `SolanaMidFeed` kurulumda uyarır.
+  Free anahtarla ~13 sn.
+- Kova belgelenen limitin **%85'inde** koşar (`JUPITER_GUVENLIK_PAYI`). Ölçüldü:
+  tam 1 rps'te 244 quote'un 15'i yine 429 aldı (kayan pencere + ağ gecikmesi
+  dalgalanması); %85'te 393 quote, 0 hata.
 - `http.ts` host bazlı 429 geri çekilmesi: 15 sn → ×2 → 5 dk tavan,
   `retry-after` varsa ona uyulur, başarı sıfırlar. Kapalıyken istek ağa
   ÇIKMAZ (`GeriCekilmeHatasi`, HttpError 429 alt sınıfı — "rota yok"

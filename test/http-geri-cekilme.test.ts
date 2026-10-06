@@ -61,21 +61,29 @@ const OK = { status: 200, govde: '{"ok":true}' };
 
 // --- Kademe ----------------------------------------------------------------
 
-test('anahtarsız lite-api: kova 0.5 rps patlama 1, tarama 30/dk', () => {
+// Belgelenen limitler (0.5 / 1 / 10 rps) %85 payla kullanılır — tam limitte
+// koşan kova canlıda yine 429 aldı (bkz. JUPITER_GUVENLIK_PAYI).
+const yakin = (a: number, b: number): void => assert.ok(Math.abs(a - b) < 1e-9, `${a} ≠ ${b}`);
+
+test('anahtarsız lite-api: kova 0.425 rps patlama 1, tarama 25.5/dk', () => {
   const s = new JupiterPriceSource(null, 'free');
   assert.equal(s.kademe, 'lite');
-  assert.equal(s.perMinute, 30);
-  assert.deepEqual(hostKovasi('lite-api.jup.ag'), { patlama: 1, saniyeBasina: 0.5 });
+  yakin(s.perMinute, 25.5);
+  const k = hostKovasi('lite-api.jup.ag')!;
+  assert.equal(k.patlama, 1);
+  yakin(k.saniyeBasina, 0.425);
 });
 
 test('anahtarlı kademeler: free 1 rps / developer 10 rps — kova ve perMinute aynı kaynaktan', () => {
   const dev = new JupiterPriceSource('k', 'developer');
-  assert.equal(dev.perMinute, 600);
-  assert.deepEqual(hostKovasi('api.jup.ag'), { patlama: 10, saniyeBasina: 10 });
+  yakin(dev.perMinute, 510);
+  yakin(hostKovasi('api.jup.ag')!.patlama, 8.5);
+  yakin(hostKovasi('api.jup.ag')!.saniyeBasina, 8.5);
 
   const free = new JupiterPriceSource('k', 'free');
-  assert.equal(free.perMinute, 60);
-  assert.deepEqual(hostKovasi('api.jup.ag'), { patlama: 1, saniyeBasina: 1 });
+  yakin(free.perMinute, 51);
+  assert.equal(hostKovasi('api.jup.ag')!.patlama, 1);
+  yakin(hostKovasi('api.jup.ag')!.saniyeBasina, 0.85);
   // Kova ile perMinute ayrışamaz: ikisi de aynı satırdan türüyor.
   assert.equal(hostKovasi('api.jup.ag')!.saniyeBasina * 60, free.perMinute);
 });
@@ -86,10 +94,10 @@ test('kademe: anahtar yoksa lite, varsa config kademesi (varsayılan free)', () 
   assert.equal(jupiterKademesi('k'), 'free');
 });
 
-test('periyot: 134 token anahtarsız ~23 sn, 30 sn bütçenin içinde', () => {
+test('periyot: 134 token anahtarsız ~27 sn, 30 sn bütçenin içinde', () => {
   const s = new JupiterPriceSource(null, 'free');
   const aralik = guvenliAralik(Math.ceil(134 / s.chunkSize), s.perMinute, 5000, s.taramaPayi);
-  assert.equal(aralik, 22_858);
+  assert.equal(aralik, 26_891);
   assert.equal(periyotButceUyarisi(aralik, 30_000), null);
   // ~240 token (6 istek/tur) bütçeyi aşar → yapısal uyarı.
   const buyuk = guvenliAralik(6, s.perMinute, 5000, s.taramaPayi);

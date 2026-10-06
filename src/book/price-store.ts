@@ -29,6 +29,14 @@ export class PriceStore {
   private readonly pairs: PairKey[];
   private readonly venues: VenueId[];
 
+  /**
+   * Venue başına son yazım anı (recvTs). Slotun kendi yaşı yalnızca O
+   * sembolün L1'inin ne zaman DEĞİŞTİĞİNİ söyler; "değişince yayınlayan"
+   * feed'lerde sakin bir defter canlı bağlantıda da yaşlanır. Venue'nun
+   * genel olarak veri akıtıp akıtmadığı bu diziden okunur.
+   */
+  private readonly venueLastWrite: Float64Array;
+
   /** Bir tick geldiğinde dirty işaretlenen pair indeksleri. */
   private readonly dirty: Uint8Array;
   private dirtyList: number[] = [];
@@ -41,6 +49,7 @@ export class PriceStore {
 
     this.data = new Float64Array(pairs.length * venues.length * FIELDS);
     this.dirty = new Uint8Array(pairs.length);
+    this.venueLastWrite = new Float64Array(venues.length);
   }
 
   get pairCount(): number {
@@ -97,6 +106,7 @@ export class PriceStore {
     d[o + F_ASK_QTY] = askQty;
     d[o + F_EXCHANGE_TS] = exchangeTs;
     d[o + F_RECV_TS] = recvTs;
+    this.venueLastWrite[slot % this.venues.length] = recvTs;
 
     const pi = (slot / this.venues.length) | 0;
     if (this.dirty[pi] === 0) {
@@ -122,6 +132,11 @@ export class PriceStore {
   }
   recvTs(slot: number): number {
     return this.data[slot * FIELDS + F_RECV_TS]!;
+  }
+
+  /** Venue'nun HERHANGİ bir slotuna son yazım anı; hiç yazılmadıysa 0. */
+  venueLastWriteTs(venueIndex: number): number {
+    return this.venueLastWrite[venueIndex]!;
   }
 
   /** Slot hiç veri almadıysa false. */

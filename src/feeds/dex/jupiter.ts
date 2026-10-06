@@ -32,12 +32,20 @@ import type { JupiterTier } from '../../core/config.ts';
 
 export type JupiterKademe = 'lite' | 'free' | 'developer';
 
+/**
+ * Belgelenen limitin kullanılan payı. Ölçüldü (2026-10-07, Free anahtar):
+ * kova TAM 1 rps'teyken 244 quote'un 15'i yine 429 aldı — Jupiter 60 sn'lik
+ * kayan pencereyle sayıyor ve ağ gecikmesindeki dalgalanma istekleri
+ * pencerede sıkıştırıyor. Limitin tam üstünde koşmak, sınırda koşmaktır.
+ */
+const JUPITER_GUVENLIK_PAYI = 0.85;
+
 export const JUPITER_KADEMELERI: Readonly<
   Record<JupiterKademe, { readonly host: string; readonly saniyeBasina: number }>
 > = {
-  lite: { host: 'lite-api.jup.ag', saniyeBasina: 0.5 },
-  free: { host: 'api.jup.ag', saniyeBasina: 1 },
-  developer: { host: 'api.jup.ag', saniyeBasina: 10 },
+  lite: { host: 'lite-api.jup.ag', saniyeBasina: 0.5 * JUPITER_GUVENLIK_PAYI },
+  free: { host: 'api.jup.ag', saniyeBasina: 1 * JUPITER_GUVENLIK_PAYI },
+  developer: { host: 'api.jup.ag', saniyeBasina: 10 * JUPITER_GUVENLIK_PAYI },
 };
 
 /**
