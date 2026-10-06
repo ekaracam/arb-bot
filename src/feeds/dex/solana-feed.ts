@@ -24,7 +24,11 @@ import type {
   PairKey,
 } from '../../core/types.ts';
 import { RateCounter } from '../../core/metrics.ts';
-import { guvenliAralik, type SolanaPriceSource } from './solana-price.ts';
+import {
+  guvenliAralik,
+  periyotButceUyarisi,
+  type SolanaPriceSource,
+} from './solana-price.ts';
 
 /**
  * Referanstan azami sapma — ÖLÇÜLEREK seçildi, tahmin değil.
@@ -62,6 +66,12 @@ export interface SolanaFeedOptions {
   readonly maxReferansSapmasi?: number;
   /** Referans fiyatın azami yaşı (ms) — bayat referansla karar verilmez. */
   readonly maxReferansYasiMs?: number;
+  /**
+   * DEX bayatlık bütçesi (`MAX_DEX_PRICE_AGE_MS`). Türetilen tarama periyodu
+   * bunu aşarsa kurulumda yapısal uyarı basılır. Verilmezse 30 sn (config
+   * varsayılanı).
+   */
+  readonly maxPriceAgeMs?: number;
 }
 
 export interface SolanaToken {
@@ -154,7 +164,15 @@ export class SolanaMidFeed implements Feed {
       this.source.taramaPayi,
     );
     this.timer = setInterval(() => void this.poll(), interval);
+
+    // Periyot bayatlık bütçesini aşarsa her fiyat yazıldığı anda bayattır ve
+    // venue yapısal olarak taranamaz — panel "live" derken. Jupiter anahtarsız
+    // (30/dk, pay 0.35) 134 token'da ~23 sn: bütçenin (30 sn) içinde ama dar.
+    this.periyotUyarisi = periyotButceUyarisi(interval, this.opts.maxPriceAgeMs ?? 30_000);
   }
+
+  /** Kurulumda saptanan yapısal sorun — her turda teşhisin başına eklenir. */
+  private periyotUyarisi: string | null = null;
 
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
@@ -260,7 +278,11 @@ export class SolanaMidFeed implements Feed {
       latencyP99: 0,
       clockSkewMs: 0,
       subscribedCount: this.tokens.length,
-      lastError: this.lastError,
+      // Yapısal uyarı tur teşhisinin ÖNÜNE geçer (CowFeed ile aynı kural).
+      lastError:
+        this.periyotUyarisi !== null
+          ? `${this.periyotUyarisi}${this.lastError ? ` · ${this.lastError}` : ''}`
+          : this.lastError,
     };
   }
 }

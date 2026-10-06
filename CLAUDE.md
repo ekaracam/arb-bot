@@ -188,6 +188,17 @@ kuyruğa giriyordu. Bu tekrarların bilgi değeri yok — derinlik önbelleği 2
 yani aynı defteri okuyup aynı sonuca varıyorlar. Soğuma süresi bu yüzden önbellek
 TTL'ine bağlı; düşürmek kotayı boşa harcar.
 
+**Quote ile doğrulanan DEX bacağında ek şart: DEX fiyatı yeniden yazılmadıysa
+yeniden kuyruk yok.** Ölçüldü: Jupiter `/swap/v1/quote` ~39 istek/dk ile 30/dk
+limitini aşıyordu, çünkü orta fiyat 11–23 sn'de bir yazılırken çift her CEX
+tick'iyle dirty oluyor ve 2 sn dolar dolmaz AYNI DEX fiyatıyla yeniden quote
+ediliyordu. Artık aynı (alış, satış) slot kombinasyonu, DEX slotunun `recvTs`'i son
+kuyruğa alınma anından eski ise atlanır (`skippedByDexUnchanged`, panelde `dex aynı
+N`). YALNIZCA `QUOTE_ILE_DOGRULANAN` (jupiter, raydium) — EVM DEX'ler quoter'a
+gitmez, kota baskısı yok, CEX değişimine hemen tepki vermeleri daha değerli.
+DEX↔DEX'te bacaklardan HERHANGİ BİRİNİN yazılması yeter; kuyruktan atılan aday
+işareti siler; 429 alan doğrulama "yapıldı" sayılır. Eleme değil erteleme.
+
 Bu ayrımı bozmak (ör. Aşama 1'e async iş koymak, ya da Aşama 2'yi atlamak) botun tüm
 değerini yok eder.
 
@@ -1566,6 +1577,24 @@ kalır, panel "live" gösterir, fiyatlar bayatlar. Yeni kaynak eklerken `perMinu
 Aşama 2 doğrulaması `swap/v1/quote` ile AYNI host kovasını kullanıyor ve doğrulama
 kârı belirleyen aşama — tarama uğruna aç bırakılamaz. Kendi host'unu kullanan
 kaynakta pay yüksek tutulur.
+
+**Jupiter limiti 2× aşılıyordu ve 429'da fren yoktu (ölçüldü, düzeltildi).**
+Panel `133 hata (HTTP 429 …/swap/v1…)`. Belgelenen limit (60 sn kayan pencere):
+anahtarsız `lite-api` **0.5 rps = 30/dk**, Free anahtar 1 rps, Developer 10 rps.
+Kod 60/dk varsayıyordu (kova 1/sn, `perMinute = 60`), anahtarlı dalda ise
+Developer rakamını her anahtara uyguluyordu. Aşama 2 kuyruğu doymuş olduğu için
+dolu kovayı hep tüketip pencereyi sürekli dolu tutuyordu; tarama da `retries: 1`
+ile her 429'u ikinci istekle ödüllendiriyordu. Şimdi:
+- Kova ve `perMinute` TEK tablodan türer (`JUPITER_KADEMELERI`, jupiter.ts);
+  anahtarlı kademe `.env`'de `JUPITER_TIER` (`free` varsayılan | `developer`),
+  tek doğrulama yeri `loadConfig()` → `cfg.jupiterTier`; tanınmayan değer
+  başlangıçta hata. Anahtarsız periyot 134 token'da **~23 sn** (eski
+  11.4 sn), 30 sn'lik bütçenin içinde; aşarsa `SolanaMidFeed` kurulumda uyarır.
+- `http.ts` host bazlı 429 geri çekilmesi: 15 sn → ×2 → 5 dk tavan,
+  `retry-after` varsa ona uyulur, başarı sıfırlar. Kapalıyken istek ağa
+  ÇIKMAZ (`GeriCekilmeHatasi`, HttpError 429 alt sınıfı — "rota yok"
+  sayılmaz), 429 hiçbir zaman yeniden denenmez. TÜM host'lara uygulanır.
+  Durum `geriCekilmeDurumu(host)` / `kapaliHostlar()` ile okunur.
 
 ## Config ve .env
 

@@ -94,6 +94,23 @@ const NET_KAYIT_MAX = 500;
 const IMPLAUSIBLE_RAW_PCT = 0.20;
 
 /**
+ * Aşama 2'de `DexLegQuoter` ile (kotalı HTTP quote) doğrulanan DEX venue'ları —
+ * "DEX fiyatı değişmediyse yeniden kuyruk yok" kuralı YALNIZCA bunlara uygulanır.
+ *
+ * Neden yalnızca bunlar: kural Jupiter `/swap/v1/quote` kotasını korumak için
+ * var (ölçüldü: ~39 istek/dk, limit 30/dk). EVM DEX'ler (aerodrome, uniswap-v3,
+ * camelot, cow-base) Aşama 2'de quoter'a gitmez — feed'in yazdığı gerçek
+ * miktarla değerlenir, yeniden doğrulamanın maliyeti yalnızca CEX derinliğidir.
+ * Orada CEX defteri değişince hemen yeniden doğrulamak kota tasarrufundan
+ * değerli.
+ *
+ * Elle yazılı bir liste ama eksik kalmasının yönü güvenli: listede olmayan
+ * venue eski davranışa (yalnızca süre soğuması) düşer — fazladan quote, kapsam
+ * kaybı değil. `VenueLegQuoter`'a yeni venue eklenirse buraya da eklenmeli.
+ */
+const QUOTE_ILE_DOGRULANAN: readonly DexId[] = ['jupiter', 'raydium'];
+
+/**
  * Makul olmayan adayın önceliğinden düşülen sabit.
  *
  * Ham farktan çıkarılıyor, sabit bir değere EZİLMİYOR: böylece bu adaylar
@@ -270,6 +287,12 @@ export class Scanner {
   private rejectedByAddress = 0;
   private staleVenueSkips = 0;
   private skippedByCooldown = 0;
+  /**
+   * DEX bacaklı adayın, DEX fiyatı son kuyruğa alınmadan beri YENİDEN
+   * YAZILMADIĞI için atlandığı durumlar. Eleme değil erteleme — ayrıntı
+   * `evaluate()` içinde.
+   */
+  private skippedByDexUnchanged = 0;
   private persistentCount = 0;
   private droppedCount = 0;
   private lastEvalDurationUs = 0;
@@ -389,17 +412,38 @@ export class Scanner {
     }
 
     this.lastQueuedAt = new Float64Array(store.pairCount);
+    this.lastQueuedBuySlot = new Int32Array(store.pairCount).fill(-1);
+    this.lastQueuedSellSlot = new Int32Array(store.pairCount).fill(-1);
     this.venueMaxAge = new Float64Array(store.venueCount);
+    this.venueIsDex = new Uint8Array(store.venueCount);
+    this.venueQuoteIle = new Uint8Array(store.venueCount);
     for (let v = 0; v < store.venueCount; v++) {
       const id = store.venueAt(v);
-      this.venueMaxAge[v] =
-        id && isDex(id) ? cfg.scan.maxDexPriceAgeMs : cfg.scan.maxPriceAgeMs;
+      const dex = Boolean(id && isDex(id));
+      this.venueIsDex[v] = dex ? 1 : 0;
+      this.venueQuoteIle[v] =
+        dex && QUOTE_ILE_DOGRULANAN.includes(id as DexId) ? 1 : 0;
+      this.venueMaxAge[v] = dex ? cfg.scan.maxDexPriceAgeMs : cfg.scan.maxPriceAgeMs;
     }
   }
 
   private readonly venueMaxAge: Float64Array;
+  /** Venue indeksi → DEX mi (1/0). Hot path'te `isDex(string)` çağırmamak için. */
+  private readonly venueIsDex: Uint8Array;
+  /**
+   * Venue indeksi → Aşama 2'de kotalı quote ile mi doğrulanıyor (1/0), yani
+   * "DEX değişmedi" kuralına tabi mi. Bkz. `QUOTE_ILE_DOGRULANAN`.
+   */
+  private readonly venueQuoteIle: Uint8Array;
   /** Çift başına son kuyruğa alınma zamanı — allocation'sız soğuma takibi. */
   private readonly lastQueuedAt: Float64Array;
+  /**
+   * Çift başına son kuyruğa alınan adayın alış/satış slotu (-1: yok).
+   * DEX değişmedi kuralı yalnızca AYNI bacak kombinasyonu için geçerli —
+   * en iyi ask/bid başka venue'ya geçtiyse o rota hiç doğrulanmamıştır.
+   */
+  private readonly lastQueuedBuySlot: Int32Array;
+  private readonly lastQueuedSellSlot: Int32Array;
   /** DEX tarafı kimlik tablosu: "SYMBOL|chain" → kontrat/mint adresi. */
   private readonly tokenAddresses = new Map<string, string>();
 
@@ -426,6 +470,7 @@ export class Scanner {
       rejectedByStale: this.rejectedByStale,
       staleVenueSkips: this.staleVenueSkips,
       skippedByCooldown: this.skippedByCooldown,
+      skippedByDexUnchanged: this.skippedByDexUnchanged,
       persistentCount: this.persistentCount,
       droppedCount: this.droppedCount,
       lastEvalDurationUs: this.lastEvalDurationUs,
@@ -562,6 +607,56 @@ export class Scanner {
         continue;
       }
 
+      // Quote ile doğrulanan DEX bacağı (jupiter, raydium) varsa ek şart:
+      // DEX fiyatı son kuyruğa alınmadan beri YENİDEN YAZILMADIYSA atla.
+      //
+      // Ölçülen sebep: Jupiter `/swap/v1/quote` ~39 istek/dk ile 30/dk
+      // limitini aşıyordu. Jupiter orta fiyatı 11–23 sn'de bir yazılıyor, ama
+      // çift CEX tarafındaki HER tick'le dirty oluyor ve 2 sn'lik soğuma
+      // dolar dolmaz aynı DEX fiyatıyla yeniden quote ediliyordu — kotayı
+      // yakan, bilgi taşımayan tekrar.
+      //
+      // EVM DEX'ler kurala TABİ DEĞİL (bkz. `QUOTE_ILE_DOGRULANAN`): kota
+      // baskısı yok, CEX defteri değişince hemen yeniden doğrulanmaları daha
+      // değerli. Karışık bir DEX↔DEX adayında (ör. jupiter↔aerodrome) EVM
+      // bacağının yeniden yazılması da yeni bilgi sayılır.
+      //
+      // ELEME DEĞİL ERTELEME: `makulDegil`/ince havuz "öncelik düşürme"
+      // kuralıyla çelişmez. Aday hakkını kaybetmez; DEX slotu bir sonraki
+      // yazımda (yeni bilgi) yeniden kuyruğa girer. Sayaç ayrı
+      // (`skippedByDexUnchanged`), çünkü bu botta sessiz atlama olmaz.
+      //
+      // Yalnızca AYNI (alış, satış) slot kombinasyonu için: en iyi ask/bid
+      // başka bir venue'ya geçtiyse o rota hiç doğrulanmamıştır ve DEX'in
+      // yaşı onun için bir şey söylemez.
+      //
+      // DEX↔DEX: bacaklardan HERHANGİ BİRİ yeniden yazıldıysa kuyruğa alınır
+      // ("ikisi de" değil). İki feed farklı periyotta çalışıyor (Jupiter
+      // 11–23 sn, Raydium ayrı); "ikisi de" şartı, hızlı bacağın yeni
+      // fiyatını yavaş bacak yazana kadar görmezden gelirdi. Yanılma yönü
+      // muhafazakâr: fazladan bir quote, kapsam kaybından ucuz.
+      //
+      // `>=`: aynı milisaniyede yazılmış fiyatın kuyruğa alınmadan önce mi
+      // sonra mı geldiği ayırt edilemez; belirsizlikte yeniden doğrula.
+      const buyV = bestAskSlot % venueCount;
+      const sellV = bestBidSlot % venueCount;
+      const buyDex = this.venueIsDex[buyV] === 1;
+      const sellDex = this.venueIsDex[sellV] === 1;
+      if (
+        (this.venueQuoteIle[buyV] === 1 || this.venueQuoteIle[sellV] === 1) &&
+        this.lastQueuedBuySlot[pairIndex] === bestAskSlot &&
+        this.lastQueuedSellSlot[pairIndex] === bestBidSlot
+      ) {
+        const sonKuyruk = this.lastQueuedAt[pairIndex]!;
+        const yeniDexFiyati =
+          (buyDex && this.store.recvTs(bestAskSlot) >= sonKuyruk) ||
+          (sellDex && this.store.recvTs(bestBidSlot) >= sonKuyruk);
+        if (!yeniDexFiyati) {
+          this.skippedByDexUnchanged++;
+          continue;
+        }
+      }
+
       const pair = this.store.pairAt(pairIndex);
       const buyVenue = this.store.slotVenue(bestAskSlot);
       const sellVenue = this.store.slotVenue(bestBidSlot);
@@ -581,6 +676,8 @@ export class Scanner {
       // Aynı sebeple burada: soğumaya takılan tekrarlar sayılmasın.
       if (inceHavuz) this.inceHavuzOnceliksiz++;
       this.lastQueuedAt[pairIndex] = now;
+      this.lastQueuedBuySlot[pairIndex] = bestAskSlot;
+      this.lastQueuedSellSlot[pairIndex] = bestBidSlot;
       this.queue.push({
         pair,
         pairIndex,
@@ -602,6 +699,16 @@ export class Scanner {
         const dropped = this.queue.splice(worstIdx, 1)[0]!;
         this.verifying.delete(`${dropped.pair}|${dropped.buyVenue}|${dropped.sellVenue}`);
         this.droppedCount++;
+        // Atılan aday hiç DOĞRULANMADI: "DEX değişmedi" kuralı onun için
+        // geçerli olmamalı, yoksa bir sonraki DEX yazımına (11–23 sn) kadar
+        // kuyruğa giremezdi. İşaret yalnızca hâlâ bu adayı gösteriyorsa silinir.
+        if (
+          this.lastQueuedBuySlot[dropped.pairIndex] === dropped.buySlot &&
+          this.lastQueuedSellSlot[dropped.pairIndex] === dropped.sellSlot
+        ) {
+          this.lastQueuedBuySlot[dropped.pairIndex] = -1;
+          this.lastQueuedSellSlot[dropped.pairIndex] = -1;
+        }
       }
     }
 

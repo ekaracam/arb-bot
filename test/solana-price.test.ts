@@ -78,6 +78,6 @@ test('jupiter anahtarlı/anahtarsız farklı limit bildirir', () => {
 });
 
 test('kaynak seçimi ada göre doğru sınıfı verir', () => {
-  assert.equal(createSolanaPriceSource('geckoterminal', null).ad, 'geckoterminal');
-  assert.equal(createSolanaPriceSource('jupiter', null).ad, 'jupiter');
+  assert.equal(createSolanaPriceSource('geckoterminal', null, 'free').ad, 'geckoterminal');
+  assert.equal(createSolanaPriceSource('jupiter', null, 'free').ad, 'jupiter');
 });

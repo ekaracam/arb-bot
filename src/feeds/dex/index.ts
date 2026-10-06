@@ -217,6 +217,7 @@ export function createDexFeeds(
         createSolanaPriceSource(
           cfg.solanaPriceSource,
           process.env['JUPITER_API_KEY'] ?? null,
+          cfg.jupiterTier,
         ),
     },
     { venue: 'raydium', kaynak: () => new RaydiumPriceSource(), referansVenue: 'jupiter' },
@@ -250,6 +251,7 @@ export function createDexFeeds(
               priceSource: sv.kaynak(),
               ...(sv.referansVenue ? { referansVenue: sv.referansVenue } : {}),
               maxReferansYasiMs: cfg.scan.maxDexPriceAgeMs,
+              maxPriceAgeMs: cfg.scan.maxDexPriceAgeMs,
             })
           : null,
       venue: sv.venue,

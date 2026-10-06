@@ -78,6 +78,7 @@ export interface RenderState {
     staleVenueSkips: number;
     persistentCount: number;
     droppedCount: number;
+    skippedByDexUnchanged: number;
     lastEvalDurationUs: number;
     verifyErrors: number;
     lastVerifyError: string | null;
@@ -343,6 +344,11 @@ export class Renderer {
         // kapasitesinin üstünde aday ürettiğinin tek ölçüsüdür.
         (sc.droppedCount > 0
           ? `${C.reset}${C.yellow} │ atılan ${sc.droppedCount}${C.reset}`
+          : '') +
+        // DEX fiyatı yeniden yazılmadığı için ERTELENEN tekrarlar — eleme
+        // değil, Jupiter kotasının korunduğunun ölçüsü. Sıfırken gürültü.
+        (sc.skippedByDexUnchanged > 0
+          ? `${C.dim} │ dex aynı ${sc.skippedByDexUnchanged}${C.reset}`
           : '') +
         // "0 sinyal" tek başına eşiğin az mı çok mu altında kaldığımızı
         // söylemiyor. Kâr hesabına ulaşan aday sayısı ve görülen en iyi net

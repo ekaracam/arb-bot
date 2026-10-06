@@ -30,6 +30,24 @@ function loadEnv(): void {
 }
 loadEnv();
 
+/** Anahtarlı Jupiter kademeleri (developers.jup.ag/docs/api-rate-limit). */
+export type JupiterTier = 'free' | 'developer';
+
+/**
+ * `JUPITER_TIER` ham değerini çözer. Boş = `free` (en dar anahtarlı kademe —
+ * yanlış tarafta hata yapmak 429 değil yalnızca yavaş tarama demek).
+ * Tanınmayan değer HATA: yanlış yazılmış kademenin sessizce varsayılana
+ * düşmesi, ödenen kademenin hiç kullanılmaması ya da ücretsizin aşılması
+ * demektir ve hiçbir yerde görünmez. Anahtar yokken de doğrulanır —
+ * yazım hatası anahtarın eklendiği gün değil bugün görünmeli.
+ */
+export function jupiterTierCoz(ham: string | undefined): JupiterTier {
+  const v = (ham ?? '').trim().toLowerCase();
+  if (v === '') return 'free';
+  if (v === 'free' || v === 'developer') return v;
+  throw new Error(`JUPITER_TIER geçersiz: "${ham}" — 'free' veya 'developer' olmalı (.env)`);
+}
+
 function env(key: string, fallback?: string): string {
   const v = process.env[key];
   if (v === undefined || v === '') {
@@ -231,6 +249,13 @@ export interface AppConfig {
    * (bkz. feeds/dex/solana-price.ts).
    */
   readonly solanaPriceSource: 'jupiter' | 'geckoterminal';
+
+  /**
+   * Jupiter API anahtarının kademesi (`JUPITER_TIER`). Kova ve tarama periyodu
+   * bundan türer (feeds/dex/jupiter.ts `JUPITER_KADEMELERI`). Anahtar yoksa
+   * kullanılmaz — anahtarsız uç (`lite-api`) kendi kademesindedir.
+   */
+  readonly jupiterTier: JupiterTier;
 
   readonly sound: {
     readonly enabled: boolean;
@@ -479,6 +504,7 @@ export function loadConfig(): AppConfig {
     );
   }
   const solanaKaynak = solanaKaynakHam;
+  const jupiterTier = jupiterTierCoz(process.env['JUPITER_TIER']);
 
   cached = {
     exchanges: exchanges as Record<CexId, ExchangeConfig>,
@@ -506,6 +532,7 @@ export function loadConfig(): AppConfig {
       resendDeltaPct: envNum('TELEGRAM_RESEND_DELTA_PCT', 0.5) / 100,
     },
     solanaPriceSource: solanaKaynak,
+    jupiterTier,
     sound: {
       enabled: envBool('SOUND_ENABLED', true),
       cooldownMs: envNum('SOUND_COOLDOWN_MS', 15_000),

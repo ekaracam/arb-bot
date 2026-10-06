@@ -1,8 +1,8 @@
 /**
  * Solana geniş tarama fiyat kaynakları.
  *
- * NEDEN SEÇENEK VAR: Jupiter'in ücretsiz uç noktası (lite-api) saniyede 1 istek
- * kabul ediyor. 113 mint 3 isteğe bölününce her tarama turu bu kovanın ~3
+ * NEDEN SEÇENEK VAR: Jupiter'in ücretsiz uç noktası (lite-api) saniyede 0.5
+ * istek (30/dk, 60 sn kayan pencere) kabul ediyor. 113 mint 3 isteğe bölününce her tarama turu bu kovanın ~3
  * saniyesini yiyor ve Aşama 2'nin `swap/v1/quote` doğrulamalarına yer kalmıyor.
  * Doğrulama, kârı belirleyen aşamadır — onu aç bırakmak kabul edilemez.
  *
@@ -21,6 +21,13 @@
  */
 
 import { httpJson } from '../../core/http.ts';
+import type { JupiterTier } from '../../core/config.ts';
+import {
+  jupiterDakikaLimiti,
+  jupiterKademesi,
+  jupiterKovasiniKur,
+  type JupiterKademe,
+} from './jupiter.ts';
 
 export interface SolanaPriceSource {
   readonly ad: string;
@@ -62,18 +69,46 @@ export function guvenliAralik(
   return Math.max(tabanMs, gerekenMs);
 }
 
+/**
+ * Tarama periyodu bayatlık bütçesini (`MAX_DEX_PRICE_AGE_MS`) aşıyor mu?
+ * Aşıyorsa fiyat yazıldığı anda bayat sayılır ve venue HİÇ taranamaz —
+ * panel "live" derken. Uyarı metni döner, sığıyorsa `null` (CoW feed'indeki
+ * kurulum-anı uyarısıyla aynı desen).
+ */
+export function periyotButceUyarisi(aralikMs: number, butceMs: number): string | null {
+  if (!(butceMs > 0) || aralikMs < butceMs) return null;
+  return (
+    `tarama periyodu ${(aralikMs / 1000).toFixed(0)} sn — bayatlık eşiği ` +
+    `${(butceMs / 1000).toFixed(0)} sn'yi AŞIYOR, bu venue taranamaz. ` +
+    `Token sayısını azalt, kademeyi yükselt (JUPITER_TIER) ya da MAX_DEX_PRICE_AGE_MS'i artır.`
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 /** Jupiter price/v3 — varsayılan. Anahtar varsa pro uç noktası kullanılır. */
 export class JupiterPriceSource implements SolanaPriceSource {
   readonly ad = 'jupiter';
   readonly chunkSize = 40;
+  readonly kademe: JupiterKademe;
+  /**
+   * Kademenin limiti — host kovasıyla AYNI tanımdan (`JUPITER_KADEMELERI`).
+   * Anahtarsız 30/dk: 134 token = 4 istek/tur, pay 0.35 → periyot ~23 sn.
+   * Bu `MAX_DEX_PRICE_AGE_MS` (30 sn) bütçesinin İÇİNDE ama payı dar; token
+   * listesi ~170'i geçerse (5 istek/tur → ~29 sn) bütçe aşılır ve
+   * `SolanaMidFeed` kurulumda uyarı basar.
+   */
+  readonly perMinute: number;
+  private readonly base: string;
 
-  constructor(private readonly apiKey: string | null = null) {}
-
-  get perMinute(): number {
-    // lite-api: 1/sn. Anahtarlı uç nokta belirgin biçimde yüksek.
-    return this.apiKey ? 600 : 60;
+  constructor(
+    private readonly apiKey: string | null = null,
+    /** Anahtarlı kademe — `cfg.jupiterTier` (doğrulaması loadConfig'te). */
+    tier: JupiterTier = 'free',
+  ) {
+    this.kademe = jupiterKademesi(apiKey, tier);
+    this.perMinute = jupiterDakikaLimiti(this.kademe);
+    this.base = jupiterKovasiniKur(this.kademe);
   }
 
   /**
@@ -86,7 +121,7 @@ export class JupiterPriceSource implements SolanaPriceSource {
   readonly taramaPayi = 0.35;
 
   async fetchPrices(mints: readonly string[]): Promise<Map<string, number>> {
-    const base = this.apiKey ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
+    const base = this.base;
     const out = new Map<string, number>();
 
     for (let i = 0; i < mints.length; i += this.chunkSize) {
@@ -96,6 +131,8 @@ export class JupiterPriceSource implements SolanaPriceSource {
         {
           headers: this.apiKey ? { 'x-api-key': this.apiKey } : {},
           timeoutMs: 8000,
+          // 429'da http.ts zaten yeniden DENEMEZ (host geri çekilmeye girer);
+          // bu yalnızca timeout/5xx içindir.
           retries: 1,
         },
       );
@@ -160,8 +197,9 @@ export type SolanaPriceSourceId = 'jupiter' | 'geckoterminal';
 export function createSolanaPriceSource(
   id: SolanaPriceSourceId,
   apiKey: string | null,
+  jupiterTier: JupiterTier,
 ): SolanaPriceSource {
   return id === 'geckoterminal'
     ? new GeckoTerminalPriceSource()
-    : new JupiterPriceSource(apiKey);
+    : new JupiterPriceSource(apiKey, jupiterTier);
 }

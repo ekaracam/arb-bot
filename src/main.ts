@@ -289,7 +289,7 @@ async function main(): Promise<void> {
   const solanaQuoters = new Map<DexId, DexLegQuoter>();
   const jupiterLeg = new JupiterLegQuoter(
     cfg.tokens,
-    new DexQuoter({ apiKey: process.env['JUPITER_API_KEY'] ?? null }),
+    new DexQuoter({ apiKey: process.env['JUPITER_API_KEY'] ?? null, tier: cfg.jupiterTier }),
   );
   const raydiumLeg = new RaydiumLegQuoter(cfg.tokens, new RaydiumQuoter());
   if (jupiterLeg.ready) solanaQuoters.set('jupiter', jupiterLeg);

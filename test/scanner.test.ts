@@ -361,6 +361,139 @@ test('soğuma kapalıyken tekrar aday üretilir', async () => {
   await r.run();
 
   assert.equal(r.scanner.stats.candidateCount, 2);
+  // CEX↔CEX: "DEX değişmedi" kuralı hiç devreye girmemeli.
+  assert.equal(r.scanner.stats.skippedByDexUnchanged, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Aşama 1 — DEX fiyatı değişmediyse yeniden doğrulama yok
+//
+// Ölçülen: Jupiter `/swap/v1/quote` ~39 istek/dk ile 30/dk limitini aşıyordu.
+// Orta fiyat 11–23 sn'de bir yazılırken çift CEX tick'iyle dirty oluyor ve
+// soğuma dolar dolmaz AYNI DEX fiyatıyla yeniden quote ediliyordu.
+// ---------------------------------------------------------------------------
+
+/** DEX slotuna orta fiyat yazar (Solana feed'i gibi miktar 0). */
+function dexMid(r: Rig, venue: VenueId, price: number, recvTs: number): void {
+  r.store.write(r.slot(venue), price, 0, price, 0, recvTs, recvTs);
+}
+
+test('CEX↔DEX: DEX yeniden yazılmadan CEX tick’i yeni quote tetiklemez', async () => {
+  const q = fakeLegQuoter({ buyBase: 1000 });
+  const r = rig({
+    venues: ['jupiter', 'binance'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, verifyCooldownMs: 0 },
+  });
+  // DEX fiyatı 1 sn önce yazılmış (taze, ama kuyruğa alınmadan ÖNCE).
+  dexMid(r, 'jupiter', 1.0, Date.now() - 1000);
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  // Soğuma kapalı, yalnızca CEX tarafı oynuyor.
+  quote(r, 'binance', 1.051, 1e6, 1.061, 1e6);
+  await r.run();
+
+  const alislar = q.calls.filter((c) => c.startsWith('buy:jupiter:'));
+  assert.equal(alislar.length, 1, `quoter yalnızca bir kez çağrılmalı: ${q.calls.join(',')}`);
+  assert.equal(r.scanner.stats.candidateCount, 1);
+  assert.equal(r.scanner.stats.skippedByDexUnchanged, 1);
+});
+
+test('CEX↔DEX: DEX yeniden yazılınca çift yeniden kuyruğa alınır', async () => {
+  const q = fakeLegQuoter({ buyBase: 1000 });
+  const r = rig({
+    venues: ['jupiter', 'binance'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, verifyCooldownMs: 0 },
+  });
+  dexMid(r, 'jupiter', 1.0, Date.now() - 1000);
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  quote(r, 'binance', 1.051, 1e6, 1.061, 1e6);
+  await r.run();
+  assert.equal(r.scanner.stats.skippedByDexUnchanged, 1);
+
+  // Yeni DEX turu: recvTs son kuyruğa alınma anını geçti.
+  dexMid(r, 'jupiter', 1.001, Date.now() + 1);
+  await r.run();
+
+  const alislar = q.calls.filter((c) => c.startsWith('buy:jupiter:'));
+  assert.equal(alislar.length, 2, `yeni DEX fiyatı yeniden quote edilmeliydi: ${q.calls.join(',')}`);
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(r.scanner.stats.skippedByDexUnchanged, 1, 'sayaç yalnızca atlamada artar');
+});
+
+test('DEX↔DEX: bacaklardan BİRİNİN yeniden yazılması yeterli', async () => {
+  // "İkisi de" şartı hızlı bacağın yeni fiyatını, yavaş bacak yazana kadar
+  // görmezden gelirdi — kapsam kaybı. Muhafazakâr yön: herhangi biri.
+  const q = fakeLegQuoter({ buyBase: 1000, sellQuote: 1100 });
+  const r = rig({
+    venues: ['jupiter', 'raydium', 'binance'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, verifyCooldownMs: 0 },
+  });
+  const once = Date.now() - 1000;
+  dexMid(r, 'jupiter', 1.0, once);
+  dexMid(r, 'raydium', 1.05, once);
+  await r.run();
+  assert.equal(r.scanner.stats.candidateCount, 1);
+
+  // Hiçbiri yeniden yazılmadan (dirty'yi bir CEX tick'i üretiyor) → atlanır.
+  quote(r, 'binance', 1.01, 1e6, 1.04, 1e6);
+  await r.run();
+  assert.equal(r.scanner.stats.candidateCount, 1);
+  assert.equal(r.scanner.stats.skippedByDexUnchanged, 1);
+
+  // Yalnızca satış bacağı (raydium) yeniden yazıldı → kuyruğa alınır.
+  dexMid(r, 'raydium', 1.051, Date.now() + 1);
+  await r.run();
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(q.calls.filter((c) => c.startsWith('buy:jupiter:')).length, 2);
+});
+
+test('DEX değişmedi kuralı yalnızca AYNI bacak kombinasyonuna uygulanır', async () => {
+  // En iyi ask başka venue'ya geçtiyse o rota hiç doğrulanmamıştır; DEX'in
+  // yaşı onun için bir şey söylemez.
+  const q = fakeLegQuoter({ buyBase: 1000 });
+  const r = rig({
+    venues: ['jupiter', 'binance', 'kucoin'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, verifyCooldownMs: 0 },
+  });
+  dexMid(r, 'jupiter', 1.0, Date.now() - 1000);
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+  quote(r, 'kucoin', 1.04, 1e6, 1.07, 1e6);
+  await r.run();
+  assert.equal(r.scanner.stats.candidateCount, 1); // jupiter → binance
+
+  // En iyi bid kucoin'e geçti: jupiter → kucoin yeni bir rota.
+  quote(r, 'kucoin', 1.08, 1e6, 1.09, 1e6);
+  await r.run();
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(r.scanner.stats.skippedByDexUnchanged, 0);
+});
+
+test('EVM DEX kurala tabi değil: CEX tick’i DEX yazılmadan da yeniden kuyruğa alır', async () => {
+  // Kural Jupiter kotasını korumak için; EVM bacağı quoter'a gitmez, kota
+  // baskısı yok ve CEX defteri değişince hemen yeniden doğrulanması değerli.
+  const r = rig({
+    venues: ['aerodrome', 'binance'],
+    cfg: { prefilterPct: 0.001, minNetPct: 0.004, verifyCooldownMs: 0, takerFees: { binance: 0 } },
+  });
+  r.transfers.setChains('KOIN', ['solana', 'base']);
+  const once = Date.now() - 1000;
+  const bought = 1000 / 1.06;
+  r.store.write(r.slot('aerodrome'), 1.05, bought, 1.06, bought, once, once);
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  await r.run();
+
+  quote(r, 'binance', 0.991, 1e6, 1.001, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 2, 'EVM bacağı eski davranışta kalmalı');
+  assert.equal(r.scanner.stats.skippedByDexUnchanged, 0);
 });
 
 test('aşama 1: DEX venue’su CEX eşiğinden eski fiyatla da değerlendirilir', async () => {

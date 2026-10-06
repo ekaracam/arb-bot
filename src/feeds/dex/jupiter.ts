@@ -14,14 +14,66 @@
  * bacağı taşıyan her fırsat buradan geçmek zorunda.
  */
 
-import { httpJson, HttpError } from '../../core/http.ts';
+import { httpJson, HttpError, hostKovasiniAyarla } from '../../core/http.ts';
+import type { JupiterTier } from '../../core/config.ts';
 
-/** API anahtarı yoksa ücretsiz uç nokta (daha sıkı rate limit). */
-const LITE = 'https://lite-api.jup.ag';
-const PRO = 'https://api.jup.ag';
+// ---------------------------------------------------------------------------
+// Kademe: kova ve dakikalık limit TEK tanımdan türer
+// ---------------------------------------------------------------------------
+//
+// Belge (developers.jup.ag/docs/api-rate-limit): 60 sn kayan pencere.
+//   anahtarsız `lite-api` 0.5 rps (30/dk) · Free anahtar 1 rps · Developer 10 rps
+//
+// ÖLÇÜLEN HATA: kod anahtarsız uçta 60/dk varsayıyordu (kova 1/sn, tarama
+// `perMinute = 60`), yani limiti 2× aşıyordu; anahtarlı dal ise Developer
+// rakamını (10 rps) her anahtara uyguluyordu — ücretsiz anahtar girilince 429
+// daha da kötüleşirdi. Kova (`http.ts`) ile tarama periyodu (`perMinute`) bu
+// tablodan türüyor; ikisi ayrı yazılırsa ayrışır (COW_PER_MINUTE dersi).
+
+export type JupiterKademe = 'lite' | 'free' | 'developer';
+
+export const JUPITER_KADEMELERI: Readonly<
+  Record<JupiterKademe, { readonly host: string; readonly saniyeBasina: number }>
+> = {
+  lite: { host: 'lite-api.jup.ag', saniyeBasina: 0.5 },
+  free: { host: 'api.jup.ag', saniyeBasina: 1 },
+  developer: { host: 'api.jup.ag', saniyeBasina: 10 },
+};
+
+/**
+ * Anahtar yoksa `lite`; varsa config'teki anahtarlı kademe. `JUPITER_TIER`
+ * burada OKUNMAZ ve doğrulanmaz — tek kaynak `loadConfig()`
+ * (`jupiterTierCoz`). `tier` verilmezse `free` (config'siz araçlar için en dar
+ * anahtarlı kademe).
+ */
+export function jupiterKademesi(
+  apiKey: string | null | undefined,
+  tier: JupiterTier = 'free',
+): JupiterKademe {
+  return apiKey ? tier : 'lite';
+}
+
+/** Kademenin dakikalık istek limiti — tarama periyodu (`guvenliAralik`) bunu kullanır. */
+export function jupiterDakikaLimiti(kademe: JupiterKademe): number {
+  return JUPITER_KADEMELERI[kademe].saniyeBasina * 60;
+}
+
+/**
+ * Kademenin host kovasını kurar ve taban URL'yi döndürür. Patlama
+ * `max(1, rps)`: kayan pencerede büyük patlama, pencerenin başında kotayı
+ * yakıp sonunda 429 demek. Tarama ve doğrulama aynı host'u kullandığında
+ * tek kovayı paylaşırlar (aynı değerle tekrar kurmak kovayı değiştirmez).
+ */
+export function jupiterKovasiniKur(kademe: JupiterKademe): string {
+  const k = JUPITER_KADEMELERI[kademe];
+  hostKovasiniAyarla(k.host, k.saniyeBasina, Math.max(1, k.saniyeBasina));
+  return `https://${k.host}`;
+}
 
 export interface JupiterOptions {
   readonly apiKey?: string | null;
+  /** Anahtarlı kademe — `cfg.jupiterTier`. Verilmezse `free`. */
+  readonly tier?: JupiterTier;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,17 +123,17 @@ export class DexQuoter {
   private calls = 0;
   private failures = 0;
 
+  private readonly base: string;
+
   constructor(
     private readonly opts: JupiterOptions = {},
     private readonly ttlMs = 3000,
-  ) {}
+  ) {
+    this.base = jupiterKovasiniKur(jupiterKademesi(opts.apiKey, opts.tier));
+  }
 
   get stats(): { calls: number; failures: number } {
     return { calls: this.calls, failures: this.failures };
-  }
-
-  private get base(): string {
-    return this.opts.apiKey ? PRO : LITE;
   }
 
   /**
