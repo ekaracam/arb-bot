@@ -92,7 +92,7 @@ export function makeConfig(o: ConfigOverrides = {}): AppConfig {
       resendDeltaPct: 0.005,
     },
     solanaPriceSource: 'jupiter',
-    sound: { enabled: false, cooldownMs: 15_000 },
+    sound: { enabled: false, cooldownMs: 15_000, device: null, volumePct: 20 },
     ui: { enabled: false, refreshHz: 4, maxRows: 15 },
     persist: { enabled: false, dir: '.' },
   };

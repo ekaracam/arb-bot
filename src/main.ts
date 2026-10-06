@@ -18,7 +18,7 @@ import { createFeed } from './feeds/cex/index.ts';
 import { TransferInfoProvider, clockSkews } from './engine/transfer-info.ts';
 import { Scanner } from './engine/scanner.ts';
 import { TelegramNotifier } from './notify/telegram.ts';
-import { SoundAlert } from './notify/sound.ts';
+import { SoundAlert, sesCihazlari } from './notify/sound.ts';
 import { Renderer, type ChainStatus, type RenderState } from './ui/renderer.ts';
 import { NdjsonWriter } from './persist/ndjson.ts';
 import { RiskManager, DEFAULT_LIMITS } from './risk/limits.ts';
@@ -396,12 +396,26 @@ async function main(): Promise<void> {
   const sound = new SoundAlert({
     enabled: cfg.sound.enabled,
     cooldownMs: cfg.sound.cooldownMs,
+    device: cfg.sound.device,
+    volumePct: cfg.sound.volumePct,
   });
   log(
     cfg.sound.enabled
       ? `sesli uyarı açık (en sık ${(cfg.sound.cooldownMs / 1000).toFixed(0)} sn'de bir)`
       : 'sesli uyarı kapalı (.env → SOUND_ENABLED=1)',
   );
+  // Cihaz eşleşmezse ses varsayılana düşmez, hiç çalmaz — bunu ilk fırsatta
+  // değil başlangıçta görmek gerek.
+  if (cfg.sound.enabled && cfg.sound.device !== null && process.platform === 'win32') {
+    const hedef = cfg.sound.device;
+    const cihazlar = await sesCihazlari();
+    const bulunan = cihazlar.find((c) => c.toLowerCase().includes(hedef.toLowerCase()));
+    log(
+      bulunan
+        ? `ses çıkışı: ${bulunan} (varsayılandan bağımsız)`
+        : `UYARI: SOUND_DEVICE="${hedef}" hiçbir çıkışla eşleşmedi, ses ÇALMAYACAK — mevcut: ${cihazlar.join(' | ')}`,
+    );
+  }
 
   // Son fırsatlar — UI için, net kâra göre sıralı tutulur.
   const recent: Opportunity[] = [];

@@ -236,6 +236,13 @@ export interface AppConfig {
     readonly enabled: boolean;
     /** İki uyarı sesi arası asgari süre (ms). */
     readonly cooldownMs: number;
+    /**
+     * Çıkış cihazı adının bir parçası (ör. `HyperX`). Tanımlıysa ses
+     * Windows'un varsayılan çıkışından BAĞIMSIZ olarak o cihazda çalar.
+     */
+    readonly device: string | null;
+    /** Ton seviyesi, % (1–100); yalnızca `device` tanımlıyken uygulanır. */
+    readonly volumePct: number;
   };
 
   readonly ui: {
@@ -502,6 +509,8 @@ export function loadConfig(): AppConfig {
     sound: {
       enabled: envBool('SOUND_ENABLED', true),
       cooldownMs: envNum('SOUND_COOLDOWN_MS', 15_000),
+      device: envOptional('SOUND_DEVICE'),
+      volumePct: envNum('SOUND_VOLUME', 20),
     },
     ui: {
       enabled: envBool('UI_ENABLED', true),
