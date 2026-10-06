@@ -225,6 +225,22 @@ tazeleme başarısız olsa bile en geç `DEFAULT_REFRESH_MS` (15 dk) sonra düş
   iş transfer-imkânsız adaylardı. Kuyruk HÂLÂ doymuş (atılan %97): boşalan
   kapasite faydalı doğrulamaya dönüşmedi, darboğaz yavaş (kotalı) bacaklar.
 
+**Kârsız sonuç da HATIRLANIR — ertelenir, elenmez.** Aynı negatif yön tekrar
+tekrar doğrulanıyordu (ELIZAOS jupiter→raydium ×17 @ %-3.92, MCDX
+jupiter→bybit ×14 @ %-1.95). Net, `minNetPct`'in en az `KARSIZ_ACIK_ESIGI`
+(0.5 puan) altındaysa o yön için "doğrulama anındaki ham fark + açık"
+saklanır; Aşama 1 ham fark o değere ulaşana ya da `KARSIZ_HAFIZA_MS` (60 sn)
+dolana kadar kuyruğa almaz (`hafiza[karsiz=N]`, tur başına sayılır). Eşiğe
+yakın sonuç (açık < 0.5 puan) hatırlanmaz; eşiğe yakın/üstü bir sonuç eski
+kaydı siler. Varsayım: maliyetler ham farktan bağımsız, yani net ham farkla
+kabaca birebir hareket eder. Aynı indeksli iki `Float64Array`, ince havuz
+hafızasıyla aynı desen. Ölçülen etki (adım 1 sonrası 9 dk → bu 7 dk, dk
+başına): aday 2584 → 1681, atılan 2490 → 1582, `netHesaplanan` 45 → 41,
+sinyal 0.2 → 0.7 (5 sinyal/7 dk — az örnek), dexQuote denenen 73 → 74
+(kota sınırında, değişmedi). Tekrarlar artık dakikada en fazla bir kez
+(MCDX ×8 / 8 dk). Doğrulanan hâlâ ~95/dk ve kuyruk hâlâ %94 atıyor: bu iki
+hafıza BOŞA giden işi kesti ama doğrulama hızını artırmadı.
+
 Bu ayrımı bozmak (ör. Aşama 1'e async iş koymak, ya da Aşama 2'yi atlamak) botun tüm
 değerini yok eder.
 

@@ -189,6 +189,27 @@ const SAKIN_DEFTER_MAX_MS = 60_000;
 const TRANSFER_HAFIZA_MS = DEFAULT_REFRESH_MS;
 
 /**
+ * Kârsız sonucun HATIRLANMASI için net'in `minNetPct`'in en az bu kadar
+ * altında kalması gerekir (yüzde puan, 0.005 = 0.5 puan).
+ *
+ * ÖLÇÜLEN GEREKÇE: aynı negatif çiftler tekrar tekrar doğrulanıyordu
+ * (ELIZAOS jupiter→raydium ×17 @ %-3.92, MCDX jupiter→bybit ×14 @ %-1.95) —
+ * her biri bir REST defteri ya da kotalı Jupiter quote'u. Eşiğe YAKIN sonuç
+ * hatırlanmaz: orada küçük bir fiyat hareketi sinyal üretebilir ve 2 sn'lik
+ * soğumayla yeniden bakmak değerli. 0.5 puan, `MIN_NET_PCT`'in (0.4) üstünde
+ * bir açık: ham farkın bu kadar artması gerçek bir piyasa hareketidir ve
+ * Aşama 1 onu zaten görür.
+ */
+const KARSIZ_ACIK_ESIGI = 0.005;
+
+/**
+ * Kârsız sonuç hafızasının ömrü. Ham fark açığı kapatacak kadar artmasa da
+ * bu süre dolunca aday yeniden doğrulanır: maliyet tarafı (defter derinliği,
+ * DEX quote'u) ham farktan bağımsız da değişebilir. Eleme değil ERTELEME.
+ */
+const KARSIZ_HAFIZA_MS = 60_000;
+
+/**
  * Tutardan BAĞIMSIZ rota ön kontrolünün sonucu.
  *
  * `ok: true` ise transferin mümkün olduğu zincirler, her bacağın tablo
@@ -358,6 +379,16 @@ export class Scanner {
   private readonly imkansizRotaSonu: Float64Array;
   /** Hafızanın ait olduğu transfer tablosu sürümü; değişince hafıza silinir. */
   private transferSurumu = 0;
+  /**
+   * Kârsız sonuç hafızası — `imkansizRotaSonu` ile aynı indeks. `karsizEsik`,
+   * adayın yeniden kuyruğa girmesi için gereken HAM fark (doğrulama anındaki
+   * ham fark + net'in eşiğe olan açığı); `karsizSon`, hafızanın son kullanma
+   * anı. Bkz. `KARSIZ_ACIK_ESIGI`.
+   */
+  private readonly karsizEsik: Float64Array;
+  private readonly karsizSon: Float64Array;
+  /** Kârsız sonuç hafızası yüzünden kuyruğa alınmayan (ertelenen) aday. */
+  private karsizHafizaAtlanan = 0;
   private staleVenueSkips = 0;
   /**
    * Venue başına Aşama 1 okuması: kaç kez taze, kaç kez bayat bulundu.
@@ -452,6 +483,8 @@ export class Scanner {
       store.pairCount * store.venueCount * store.venueCount,
     );
     this.transferSurumu = transfers.surum;
+    this.karsizEsik = new Float64Array(this.imkansizRotaSonu.length);
+    this.karsizSon = new Float64Array(this.imkansizRotaSonu.length);
     this.maxConcurrent = opts.maxConcurrentChecks ?? 8;
     this.maxQueue = opts.maxQueueDepth ?? 40;
 
@@ -555,6 +588,7 @@ export class Scanner {
       sonInceHavuz: this.sonInceHavuz,
       rejectedByAddress: this.rejectedByAddress,
       transferHafizasiAtlanan: this.transferHafizasiAtlanan,
+      karsizHafizaAtlanan: this.karsizHafizaAtlanan,
       rejectedByStale: this.rejectedByStale,
       staleVenueSkips: this.staleVenueSkips,
       /** Venue başına Aşama 1'de bayat bulunan okuma oranı (0–1). */
@@ -728,6 +762,15 @@ export class Scanner {
       const rotaIdx = pairIndex * venueCount * venueCount + buyV * venueCount + sellV;
       if (now < this.imkansizRotaSonu[rotaIdx]!) {
         this.transferHafizasiAtlanan++;
+        continue;
+      }
+
+      // Kârsız sonuç HAFIZASI (bkz. `KARSIZ_ACIK_ESIGI`): bu yön kısa süre
+      // önce eşiğin belirgin altında bulunduysa, ham fark o açığı kapatacak
+      // kadar artmadıkça yeniden doğrulanmaz. Ham fark büyüdüyse ya da süre
+      // dolduysa aday hakkını geri alır — ince havuz hafızasıyla aynı desen.
+      if (now < this.karsizSon[rotaIdx]! && rawPct < this.karsizEsik[rotaIdx]!) {
+        this.karsizHafizaAtlanan++;
         continue;
       }
 
@@ -1134,6 +1177,23 @@ export class Scanner {
       if (netPct > kayit.enIyi) kayit.enIyi = netPct;
     } else if (this.netKayit.size < NET_KAYIT_MAX) {
       this.netKayit.set(kayitAnahtari, { adet: 1, enIyi: netPct });
+    }
+
+    // Kârsız sonuç hafızası. Açık, ham farkın kabaca birebir kapatması
+    // gereken mesafedir: maliyetler (komisyon, çekim, gas) ham farktan
+    // bağımsız, kayma ise küçük hareketlerde sabite yakın. Ham fark doğrulama
+    // anındaki L1'den — net de o fiyatlarla hesaplandı.
+    const rotaIdx =
+      c.pairIndex * venueCount * venueCount +
+      (c.buySlot % venueCount) * venueCount +
+      (c.sellSlot % venueCount);
+    const acik = this.cfg.scan.minNetPct - netPct;
+    if (acik >= KARSIZ_ACIK_ESIGI) {
+      this.karsizEsik[rotaIdx] = (bestBid - bestAsk) / bestAsk + acik;
+      this.karsizSon[rotaIdx] = Date.now() + KARSIZ_HAFIZA_MS;
+    } else {
+      // Eşiğe yakın ya da üstünde: eski hafıza artık yanlış.
+      this.karsizSon[rotaIdx] = 0;
     }
 
     if (netPct < this.cfg.scan.minNetPct) return;

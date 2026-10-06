@@ -535,7 +535,7 @@ async function main(): Promise<void> {
             `kuyruk=${s.queueDepth} atılan=${s.droppedCount} ` +
             // Hafıza yüzünden kuyruğa ALINMAYAN (ertelenen) adaylar — eleme
             // değil; `elenen[transfer=]` düşüşünün sebebi burada görünür.
-            `hafiza[transfer=${s.transferHafizasiAtlanan}] ` +
+            `hafiza[transfer=${s.transferHafizasiAtlanan} karsiz=${s.karsizHafizaAtlanan}] ` +
             `elenen[derinlik=${s.rejectedByDepth} defterCekilemedi=${s.rejectedByDepthFetch} ` +
             `transfer=${s.rejectedByTransfer} ` +
             `adres=${s.rejectedByAddress} bayat=${s.rejectedByStale} ` +

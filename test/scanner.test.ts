@@ -1847,3 +1847,100 @@ test('hafıza YÖN bazında: ters yön ayrı rotadır ve kuyruğa girer', async 
   assert.equal(r.emitted.length, 1);
   assert.equal(r.emitted[0]!.id, 'KOIN|kucoin->binance');
 });
+
+// ---------------------------------------------------------------------------
+// Kârsız sonuç hafızası
+//
+// Ölçüldü: aynı negatif çiftler tekrar tekrar doğrulanıyordu (ELIZAOS
+// jupiter→raydium ×17 @ %-3.92). Komisyon %1 + %1 ile net ≈ (1+ham)·0.9801 − 1:
+// ham %0.5 → net %-1.50, eşiğe (%0.4) açık 1.90 puan → yeniden kuyruk için
+// gereken ham fark %2.40.
+// ---------------------------------------------------------------------------
+
+type KarsizStats = { karsizHafizaAtlanan: number };
+const karsiz = (r: Rig) => (r.scanner.stats as unknown as KarsizStats).karsizHafizaAtlanan;
+const pahaliRig = () => rig({ cfg: { takerFees: { binance: 0.01, kucoin: 0.01 } } });
+
+test('kârsız hafıza: eşiğin belirgin altındaki yön aynı ham farkla yeniden doğrulanmaz', async () => {
+  const r = pahaliRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.005, 1e6, 1.015, 1e6);
+  await r.run();
+  assert.equal(r.scanner.stats.netHesaplanan, 1);
+
+  // Ham fark %2.0 — açığı (gereken %2.40) kapatmıyor.
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.02, 1e6, 1.03, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 1);
+  assert.equal(r.scanner.stats.netHesaplanan, 1);
+  assert.equal(karsiz(r), 1);
+});
+
+test('kârsız hafıza: ham fark açığı kapatınca yeniden doğrulanır ve sinyal üretir', async () => {
+  const r = pahaliRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.005, 1e6, 1.015, 1e6);
+  await r.run();
+
+  // Ham fark %3.0 > %2.40 → net ≈ %0.95.
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.03, 1e6, 1.04, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(karsiz(r), 0);
+  assert.equal(r.emitted.length, 1);
+});
+
+test('kârsız hafıza: eşiğe YAKIN sonuç (açık < 0.5 puan) hatırlanmaz', async () => {
+  const r = pahaliRig();
+  // Ham %2.2 → net ≈ %0.17, açık 0.23 puan.
+  for (let i = 0; i < 2; i++) {
+    quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+    quote(r, 'kucoin', 1.022, 1e6, 1.032, 1e6);
+    await r.run();
+  }
+
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(r.scanner.stats.netHesaplanan, 2);
+  assert.equal(karsiz(r), 0);
+  assert.equal(r.emitted.length, 0);
+});
+
+test('kârsız hafıza: 60 sn dolunca aynı ham farkla da yeniden doğrulanır', async () => {
+  const r = pahaliRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.005, 1e6, 1.015, 1e6);
+  await r.run();
+
+  const gercekNow = Date.now;
+  Date.now = () => gercekNow() + 61_000;
+  try {
+    quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+    quote(r, 'kucoin', 1.005, 1e6, 1.015, 1e6);
+    await r.run();
+  } finally {
+    Date.now = gercekNow;
+  }
+
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(r.scanner.stats.netHesaplanan, 2);
+  assert.equal(karsiz(r), 0);
+});
+
+test('kârsız hafıza YÖN bazında: ters yön etkilenmez', async () => {
+  const r = pahaliRig();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.005, 1e6, 1.015, 1e6);
+  await r.run();
+
+  // Ters yön, aynı küçük ham fark: kucoin→binance hiç doğrulanmadı.
+  quote(r, 'kucoin', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'binance', 1.005, 1e6, 1.015, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(karsiz(r), 0);
+});
