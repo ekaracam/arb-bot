@@ -328,3 +328,71 @@ test('gate: zincir bayrağı yoksa coin geneline düşülür', () => {
   ]);
   assert.equal(t.get('BAZ')?.get('solana')?.depositEnabled, false);
 });
+
+// ---------------------------------------------------------------------------
+// Tarayıcının imkânsız rota hafızası için iki sözleşme
+// ---------------------------------------------------------------------------
+
+test('surum her tazelemede artar — başarısız tazelemede de', async () => {
+  // Hafıza "tablo tazelenene kadar" geçerli; tazelemeyi kaçırmak, kapanıp
+  // açılmış bir rotayı 15 dk kör bırakmak demek. Başarısız tazelemede artması
+  // zararsız: hafıza yalnızca yeniden öğrenilir.
+  const orijinal = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error('ağ yok');
+  }) as typeof fetch;
+  try {
+    const p = new TransferInfoProvider({});
+    assert.equal(p.surum, 0);
+    await p.refresh();
+    assert.equal(p.surum, 1);
+  } finally {
+    globalThis.fetch = orijinal;
+  }
+});
+
+test('kraken yatırma: SORULMAMIŞ coin kapalı döner ama "bilinmiyor" işaretli', () => {
+  // Bilinmeyen = kapalı kuralı (BONK dersi) korunuyor; işaret yalnızca
+  // tarayıcının bu cevabı 15 dk hatırlamasını engelliyor.
+  const p = new TransferInfoProvider({
+    credentials: { kraken: { key: 'k', secret: 's', passphrase: null } },
+  });
+  const ic = p as unknown as {
+    privateTables: Map<string, Map<string, Map<string, unknown>>>;
+    krakenDeposit: Map<string, { chains: Set<string>; at: number }>;
+    krakenDepositBusy: boolean;
+  };
+  ic.privateTables.set(
+    'kraken',
+    new Map([
+      [
+        'BONK',
+        new Map([
+          [
+            'solana',
+            {
+              chain: 'solana',
+              withdrawEnabled: true,
+              depositEnabled: true,
+              withdrawFee: 1,
+              withdrawMin: 0,
+              address: null,
+            },
+          ],
+        ]),
+      ],
+    ]),
+  );
+  // Kuyruk işleyicisi ağa çıkmasın.
+  ic.krakenDepositBusy = true;
+
+  const once = p.lookup('kraken', 'BONK', 'solana', 0.00002);
+  assert.equal(once.depositEnabled, false);
+  assert.equal(once.depositBilinmiyor, true);
+
+  // Cevap geldi: boş dizi = hiçbir ağda yatırılamaz. Artık KESİN kapalı.
+  ic.krakenDeposit.set('BONK', { chains: new Set(), at: Date.now() });
+  const sonra = p.lookup('kraken', 'BONK', 'solana', 0.00002);
+  assert.equal(sonra.depositEnabled, false);
+  assert.equal(sonra.depositBilinmiyor, undefined);
+});

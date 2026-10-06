@@ -199,6 +199,32 @@ gitmez, kota baskısı yok, CEX değişimine hemen tepki vermeleri daha değerli
 DEX↔DEX'te bacaklardan HERHANGİ BİRİNİN yazılması yeter; kuyruktan atılan aday
 işareti siler; 429 alan doğrulama "yapıldı" sayılır. Eleme değil erteleme.
 
+**Transfer ön kontrolü Aşama 2'nin BAŞINDA, imkânsız rota HATIRLANIR.**
+Ölçüldü (13 dk): doğrulananların ~%60'ı transfer yüzünden eleniyordu ve eleme
+`verify()`'ın SONUNDA, REST defteri ve Jupiter quote'u harcandıktan sonra
+yapılıyordu; aynı imkânsız rota her 2 sn'lik soğumada yeniden kuyruğa
+giriyordu. Şimdi `rotaOnKontrol()` (ortak zincir, alışta çekim, satışta
+yatırma, adres çapraz kontrolü — tutardan BAĞIMSIZ kısım) her `await`'ten
+önce çalışıyor ve `pickChain` de aynı fonksiyonu kullanıyor (kural iki yerde
+yazılsaydı ön kontrol, `pickChain`'in geçireceği rotayı 15 dk hatırlayarak
+elerdi). Ret (çift, alış, satış) üçlüsü için `Float64Array`'e yazılır
+(`pairIndex·V² + buyV·V + sellV`), Aşama 1 kuyruğa almaz
+(`hafiza[transfer=N]`, DURUM satırında — sayaç tur başına artar, yani aday
+sayısıyla değil `skippedByCooldown` ile aynı birimde). Hafıza
+`TransferInfoProvider.surum` değişince (her `refresh()`) tamamen silinir,
+tazeleme başarısız olsa bile en geç `DEFAULT_REFRESH_MS` (15 dk) sonra düşer.
+- **Yalnızca KESİN cevap hatırlanır.** Kraken yatırması talep üzerine
+  çekiliyor ve sorulmamış coin "kapalı" dönüyor; o ret `depositBilinmiyor`
+  işaretli ve hafızaya YAZILMAZ — yoksa sorusu kuyrukta olan coin 15 dk kör
+  kalırdı. Tutara bağlı ret (asgari çekim) da hatırlanmaz, `pickChain`'de kalır.
+- `rejectedByTransfer` / `rejectedByAddress` ayrımı ön kontrolde de aynen.
+- Ölçülen etki (önce 27 dk / sonra 6 dk, dk başına): transfer elemesi
+  **298 → 7**, derinlik 114 → 28 (transfer-imkânsız olup derinlikten de
+  düşenler artık ön kontrolde sayılıyor), `netHesaplanan` **44 → 42** (faydalı
+  iş korunuyor), dexQuote denenen 76 → 67. Doğrulanan 474 → 91/dk: atılan
+  iş transfer-imkânsız adaylardı. Kuyruk HÂLÂ doymuş (atılan %97): boşalan
+  kapasite faydalı doğrulamaya dönüşmedi, darboğaz yavaş (kotalı) bacaklar.
+
 Bu ayrımı bozmak (ör. Aşama 1'e async iş koymak, ya da Aşama 2'yi atlamak) botun tüm
 değerini yok eder.
 

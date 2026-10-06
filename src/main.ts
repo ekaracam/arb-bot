@@ -533,6 +533,9 @@ async function main(): Promise<void> {
               Number.isFinite(s.enIyiNetPct) ? `%${(s.enIyiNetPct * 100).toFixed(3)}` : 'yok'
             } ` +
             `kuyruk=${s.queueDepth} atılan=${s.droppedCount} ` +
+            // Hafıza yüzünden kuyruğa ALINMAYAN (ertelenen) adaylar — eleme
+            // değil; `elenen[transfer=]` düşüşünün sebebi burada görünür.
+            `hafiza[transfer=${s.transferHafizasiAtlanan}] ` +
             `elenen[derinlik=${s.rejectedByDepth} defterCekilemedi=${s.rejectedByDepthFetch} ` +
             `transfer=${s.rejectedByTransfer} ` +
             `adres=${s.rejectedByAddress} bayat=${s.rejectedByStale} ` +

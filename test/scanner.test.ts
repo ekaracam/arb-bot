@@ -1703,3 +1703,147 @@ test('havuz düzelirse hafıza silinir', async () => {
     0,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Transfer ön kontrolü + imkânsız rota hafızası
+//
+// Ölçüldü (13 dk): doğrulananların ~%60'ı transfer yüzünden elendi ve eleme
+// `verify()`'ın SONUNDA, yani REST defteri / Jupiter quote'u harcandıktan
+// sonra yapılıyordu; aynı imkânsız rota her soğumada yeniden kuyruğa giriyordu.
+// ---------------------------------------------------------------------------
+
+type HafizaStats = { transferHafizasiAtlanan: number };
+const hafiza = (r: Rig) => (r.scanner.stats as unknown as HafizaStats).transferHafizasiAtlanan;
+
+test('ön kontrol: çekim kapalıysa REST defteri HİÇ çekilmez', async () => {
+  const r = rig();
+  r.transfers.setRule('binance', 'KOIN', 'solana', { withdrawEnabled: false });
+  // L1 miktarı işlemi taşımıyor — ön kontrol olmasa defter çekilirdi.
+  quote(r, 'binance', 0.99, 1, 1.0, 1);
+  quote(r, 'kucoin', 1.05, 1, 1.06, 1);
+
+  await r.run();
+
+  assert.equal(r.depth.calls.length, 0);
+  assert.equal(r.scanner.stats.rejectedByTransfer, 1);
+});
+
+test('ön kontrol: DEX bacaklı adayda yatırma kapalıysa quote HİÇ atılmaz', async () => {
+  const q = fakeLegQuoter({ buyBase: 1000 });
+  const r = rig({
+    venues: ['jupiter', 'binance'],
+    legQuoter: q.quoter,
+    cfg: { prefilterPct: 0.001, minNetPct: 0.001, takerFees: { binance: 0 } },
+  });
+  r.transfers.setRule('binance', 'KOIN', 'solana', { depositEnabled: false });
+  r.store.write(r.slot('jupiter'), 1.0, 0, 1.0, 0, Date.now(), Date.now());
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+
+  await r.run();
+
+  assert.deepEqual(q.calls, []);
+  assert.equal(r.scanner.stats.dexQuoteTried, 0);
+  assert.equal(r.scanner.stats.rejectedByTransfer, 1);
+});
+
+test('hafıza: imkânsız rota tablo tazelenene kadar yeniden kuyruğa girmez', async () => {
+  const r = rig();
+  r.transfers.setRule('binance', 'KOIN', 'solana', { withdrawEnabled: false });
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 1);
+  assert.equal(r.scanner.stats.rejectedByTransfer, 1);
+  assert.equal(hafiza(r), 1);
+});
+
+test('hafıza: tablo tazelenince silinir ve açılan rota sinyal üretir', async () => {
+  const r = rig();
+  r.transfers.setRule('binance', 'KOIN', 'solana', { withdrawEnabled: false });
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  r.transfers.setRule('binance', 'KOIN', 'solana', {});
+  r.transfers.tazele();
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(hafiza(r), 0);
+  assert.equal(r.emitted.length, 1);
+});
+
+test('hafıza: henüz CEVAPLANMAMIŞ yatırma (Kraken sorgusu kuyrukta) hatırlanmaz', async () => {
+  const r = rig();
+  r.transfers.setRule('kucoin', 'KOIN', 'solana', {
+    depositEnabled: false,
+    depositBilinmiyor: true,
+  });
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+  assert.equal(r.scanner.stats.rejectedByTransfer, 1);
+
+  // Cevap geldi: yatırma açık. Hafıza olsaydı 15 dk kör kalırdık.
+  r.transfers.setRule('kucoin', 'KOIN', 'solana', {});
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  assert.equal(hafiza(r), 0);
+  assert.equal(r.emitted.length, 1);
+});
+
+test('hafıza: adres çakışması ADRES kovasında sayılır ve hatırlanır', async () => {
+  const r = rig();
+  r.transfers.setRule('binance', 'KOIN', 'solana', { address: 'Hwfh2kn2Ry' });
+  r.transfers.setRule('kucoin', 'KOIN', 'solana', { address: '8zx6EcJ3fi' });
+  for (let i = 0; i < 2; i++) {
+    quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+    quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+    await r.run();
+  }
+
+  assert.equal(r.scanner.stats.rejectedByAddress, 1);
+  assert.equal(r.scanner.stats.rejectedByTransfer, 0);
+  assert.equal(hafiza(r), 1);
+});
+
+test('hafıza: tutara BAĞLI ret (asgari çekim) hatırlanmaz', async () => {
+  const r = rig();
+  r.transfers.setRule('binance', 'KOIN', 'solana', { withdrawMin: 100_000 });
+  for (let i = 0; i < 2; i++) {
+    quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+    quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+    await r.run();
+  }
+
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(r.scanner.stats.rejectedByTransfer, 2);
+  assert.equal(hafiza(r), 0);
+});
+
+test('hafıza YÖN bazında: ters yön ayrı rotadır ve kuyruğa girer', async () => {
+  const r = rig();
+  // binance→kucoin imkânsız (binance çekim kapalı); kucoin→binance açık.
+  r.transfers.setRule('binance', 'KOIN', 'solana', { withdrawEnabled: false });
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  await r.run();
+
+  quote(r, 'binance', 1.05, 1e6, 1.06, 1e6);
+  quote(r, 'kucoin', 0.99, 1e6, 1.0, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.candidateCount, 2);
+  assert.equal(hafiza(r), 0);
+  assert.equal(r.emitted.length, 1);
+  assert.equal(r.emitted[0]!.id, 'KOIN|kucoin->binance');
+});

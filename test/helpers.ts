@@ -177,6 +177,8 @@ export interface TransferRule {
    * adresi AÇIKÇA kuran testtir.
    */
   readonly address?: string | null;
+  /** Kraken yatırma sorgusu henüz cevaplanmamış gibi davran (bkz. TransferInfo). */
+  readonly depositBilinmiyor?: boolean;
 }
 
 export interface FakeTransfers {
@@ -185,13 +187,19 @@ export interface FakeTransfers {
   setChains(coin: string, chains: ChainId[]): void;
   /** venue+coin+chain için kural. Tanımsızsa varsayılan: her şey açık, doğrulanmış. */
   setRule(venue: CexId, coin: string, chain: ChainId, rule: TransferRule): void;
+  /** Tablonun tazelendiğini taklit eder (`surum` artar). */
+  tazele(): void;
 }
 
 export function fakeTransfers(defaults: TransferRule = {}): FakeTransfers {
   const chains = new Map<string, ChainId[]>();
   const rules = new Map<string, TransferRule>();
+  let surum = 0;
 
   const provider = {
+    get surum() {
+      return surum;
+    },
     chainsFor: (coin: string): ChainId[] => chains.get(coin.toUpperCase()) ?? [],
     lookup: (venue: CexId, coin: string, chain: ChainId): TransferInfo => {
       const r = rules.get(`${venue}:${coin.toUpperCase()}:${chain}`) ?? defaults;
@@ -206,6 +214,7 @@ export function fakeTransfers(defaults: TransferRule = {}): FakeTransfers {
         verified: r.verified ?? true,
         fetchedAt: Date.now(),
         address: r.address ?? null,
+        ...(r.depositBilinmiyor ? { depositBilinmiyor: true } : {}),
       };
     },
   } as unknown as TransferInfoProvider;
@@ -217,6 +226,9 @@ export function fakeTransfers(defaults: TransferRule = {}): FakeTransfers {
     },
     setRule(venue, coin, chain, rule) {
       rules.set(`${venue}:${coin.toUpperCase()}:${chain}`, rule);
+    },
+    tazele() {
+      surum++;
     },
   };
 }

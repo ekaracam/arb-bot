@@ -939,7 +939,7 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
  * Maliyeti önemsiz: tam bir tazeleme kucoin + gate + gate ücret + anahtarlı
  * borsa başına 1 istek ≈ 7 istek. 15 dakikada bir bu, saatte 28 istek.
  */
-const DEFAULT_REFRESH_MS = 15 * 60 * 1000;
+export const DEFAULT_REFRESH_MS = 15 * 60 * 1000;
 
 /**
  * Tablo bu yaştan büyükse sinyaller uyarı taşır.
@@ -998,6 +998,21 @@ export class TransferInfoProvider {
   private gateAt = 0;
   private readonly privateAt = new Map<CexId, number>();
   private lastError: string | null = null;
+  /**
+   * Her `refresh()` sonunda artan sayaç.
+   *
+   * Tarayıcı "bu rota imkânsız" bilgisini tablonun bir sonraki tazelenmesine
+   * kadar hatırlıyor; hafızanın geçerliliği bu sayıya bağlı. Zaman damgası
+   * yerine sayaç: `fetchedAt` kaynakların EN ESKİSİ olduğu için kısmi bir
+   * tazeleme (yalnızca Gate gelmiş) onu değiştirmeyebilir, oysa Gate'in yeni
+   * durumu hafızayı geçersiz kılmalı. Getter allocation yapmaz — Aşama 1 her
+   * turda okuyor.
+   */
+  private surumSayaci = 0;
+
+  get surum(): number {
+    return this.surumSayaci;
+  }
 
   /** Bir kez de olsa başarılı olmuş kaynakların en eski çekim anı; hiç yoksa 0. */
   private get fetchedAt(): number {
@@ -1182,6 +1197,7 @@ export class TransferInfoProvider {
       }
     }
     this.known = merged;
+    this.surumSayaci++;
   }
 
   async refreshIfStale(): Promise<void> {
@@ -1222,6 +1238,7 @@ export class TransferInfoProvider {
     const own = this.tableFor(venue);
     if (own) {
       const e = own.get(c)?.get(chain);
+      const krakenYatirma = venue === 'kraken' ? this.krakenDepositFor(c, chain, e) : null;
       return {
         venue,
         coin: c,
@@ -1229,9 +1246,8 @@ export class TransferInfoProvider {
         withdrawEnabled: e?.withdrawEnabled ?? false,
         // Kraken'de yatırma AYRI uçtan gelir; tablodaki değer yer tutucudur.
         depositEnabled:
-          venue === 'kraken'
-            ? this.krakenDepositFor(c, chain, e)
-            : (e?.depositEnabled ?? false),
+          venue === 'kraken' ? krakenYatirma === 'acik' : (e?.depositEnabled ?? false),
+        ...(krakenYatirma === 'bilinmiyor' ? { depositBilinmiyor: true } : {}),
         // Gate çekim ücretini vermiyor (NaN); durum bilgisi gerçek olduğu için
         // kayıt yine doğrulanmış sayılır, yalnızca ücret tahminle doldurulur.
         withdrawFee:
@@ -1284,20 +1300,23 @@ export class TransferInfoProvider {
     coin: string,
     chain: ChainId,
     e: ChainEntry | undefined,
-  ): boolean {
+  ): 'acik' | 'kapali' | 'bilinmiyor' {
     // Çekim listesinde hiç yoksa zaten bu zincirde iş yapamayız.
-    if (!e) return false;
+    if (!e) return 'kapali';
     // Uç nokta kullanılamıyorsa eski iyimser davranış (verified:false ile).
-    if (this.krakenDepositUnavailable !== null) return e.depositEnabled;
+    if (this.krakenDepositUnavailable !== null) return e.depositEnabled ? 'acik' : 'kapali';
 
     const kayit = this.krakenDeposit.get(coin);
     if (kayit) {
       if (Date.now() - kayit.at > KRAKEN_DEPOSIT_TTL_MS) this.queueKrakenDeposit(coin);
-      return kayit.chains.has(chain);
+      return kayit.chains.has(chain) ? 'acik' : 'kapali';
     }
 
+    // Henüz sorulmadı (ya da sorgu düştü): KAPALI davranılır ama bu bir
+    // CEVAP değil. Ayrı işaretleniyor ki tarayıcı bunu "imkânsız rota" diye
+    // dakikalarca hatırlamasın — cevap birkaç saniye sonra gelebilir.
     this.queueKrakenDeposit(coin);
-    return false;
+    return 'bilinmiyor';
   }
 
   /**

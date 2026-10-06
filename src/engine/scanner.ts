@@ -28,12 +28,17 @@ import {
   type Opportunity,
   type OpportunityKind,
   type PairKey,
+  type TransferInfo,
   type VenueId,
 } from '../core/types.ts';
 import type { PriceStore } from '../book/price-store.ts';
 import type { DepthCache } from '../book/depth-cache.ts';
 import type { SymbolRegistry } from '../normalize/symbol-registry.ts';
-import { TRANSFER_TABLE_STALE_MS, type TransferInfoProvider } from './transfer-info.ts';
+import {
+  DEFAULT_REFRESH_MS,
+  TRANSFER_TABLE_STALE_MS,
+  type TransferInfoProvider,
+} from './transfer-info.ts';
 import { buyWithQuote, sellBase, l1Fill, type FillResult } from './vwap.ts';
 import type { DexLegQuoter } from '../feeds/dex/leg-quoter.ts';
 import type { CaprazKontrol, CaprazSonuc } from '../feeds/dex/capraz.ts';
@@ -166,6 +171,39 @@ const INCE_HAVUZ_TTL_MS = 10 * 60_000;
  * doğrulanacağını seçer, kâr hesabına bayat fiyat girmez.
  */
 const SAKIN_DEFTER_MAX_MS = 60_000;
+
+/**
+ * İmkânsız rota bilgisinin azami saklanma süresi.
+ *
+ * ÖLÇÜLEN GEREKÇE: 13 dakikalık koşuda doğrulanan ~5.8k adayın **3527'si
+ * (~%60)** transfer yüzünden elendi — ve bu eleme `verify()`'ın SONUNDA,
+ * yani REST defteri ve Jupiter quote'u HARCANDIKTAN sonra yapılıyordu. Üstelik
+ * aynı imkânsız rota (ortak zincir yok, çekim/yatırma kapalı, adres çakışması)
+ * her 2 sn'lik soğumada yeniden kuyruğa giriyordu: cevabı tutardan bağımsız
+ * ve tablo tazelenene kadar DEĞİŞMEYEN bir soru tekrar tekrar soruluyordu.
+ *
+ * Süre tablonun tazeleme aralığına bağlı: tablo tazelendiğinde (`surum`
+ * değişince) hafıza zaten tamamen silinir; bu sınır yalnızca tazeleme
+ * başarısız olursa hafızanın sonsuza kadar kör kalmamasını sağlar.
+ */
+const TRANSFER_HAFIZA_MS = DEFAULT_REFRESH_MS;
+
+/**
+ * Tutardan BAĞIMSIZ rota ön kontrolünün sonucu.
+ *
+ * `ok: true` ise transferin mümkün olduğu zincirler, her bacağın tablo
+ * kaydıyla birlikte döner — tutara bağlı kısım (asgari çekim, ücret) bunların
+ * üstünde `pickChain`'de uygulanır. `kesin: false`, retin bir CEVAPTAN değil
+ * henüz gelmemiş bir cevaptan (Kraken yatırma sorgusu kuyrukta) kaynaklandığı
+ * anlamına gelir: öyle bir ret hatırlanmamalı.
+ */
+type RotaOnKontrol =
+  | {
+      ok: true;
+      zincirler: { chain: ChainId; from: TransferInfo | null; to: TransferInfo | null }[];
+      adresCakismasi: boolean;
+    }
+  | { ok: false; reason: 'transfer' | 'address'; kesin: boolean };
 
 /**
  * `pickChain`'in sonucu — başarısızlıkta GEREKÇESİYLE birlikte.
@@ -305,6 +343,21 @@ export class Scanner {
    * hiç görünmezdi — bu projede tekrar eden hata sınıfı tam olarak budur.
    */
   private rejectedByAddress = 0;
+  /**
+   * Aşama 1'de "bu rota imkânsız" hafızası yüzünden kuyruğa ALINMAYAN aday.
+   * Ayrı sayaç: hafıza çalışırken `transfer=` sayacı DÜŞER ve bu sayaç
+   * olmadan düşüşün sebebi (daha az imkânsız rota mı, yoksa hatırlanıyor
+   * mu) panelden ayırt edilemezdi.
+   */
+  private transferHafizasiAtlanan = 0;
+  /**
+   * (çift, alış venue, satış venue) → imkânsız rota bilgisinin son kullanma
+   * anı. İndeks `pairIndex * venueCount² + buyV * venueCount + sellV` — Aşama 1
+   * hot path'inde Map araması ya da string birleştirme yok.
+   */
+  private readonly imkansizRotaSonu: Float64Array;
+  /** Hafızanın ait olduğu transfer tablosu sürümü; değişince hafıza silinir. */
+  private transferSurumu = 0;
   private staleVenueSkips = 0;
   /**
    * Venue başına Aşama 1 okuması: kaç kez taze, kaç kez bayat bulundu.
@@ -395,6 +448,10 @@ export class Scanner {
   ) {
     this.venues = [...venues];
     this.inceHavuzSonu = new Float64Array(store.pairCount * store.venueCount);
+    this.imkansizRotaSonu = new Float64Array(
+      store.pairCount * store.venueCount * store.venueCount,
+    );
+    this.transferSurumu = transfers.surum;
     this.maxConcurrent = opts.maxConcurrentChecks ?? 8;
     this.maxQueue = opts.maxQueueDepth ?? 40;
 
@@ -497,6 +554,7 @@ export class Scanner {
       inceHavuzOnceliksiz: this.inceHavuzOnceliksiz,
       sonInceHavuz: this.sonInceHavuz,
       rejectedByAddress: this.rejectedByAddress,
+      transferHafizasiAtlanan: this.transferHafizasiAtlanan,
       rejectedByStale: this.rejectedByStale,
       staleVenueSkips: this.staleVenueSkips,
       /** Venue başına Aşama 1'de bayat bulunan okuma oranı (0–1). */
@@ -563,6 +621,15 @@ export class Scanner {
     if (now - this.lastPruneAt > 60_000) {
       this.lastPruneAt = now;
       this.tracker.prune(30 * 60_000, now);
+    }
+
+    // Transfer tablosu tazelendiyse "imkânsız rota" hafızası artık bilgi
+    // değil: kapalı çekim açılmış olabilir. Tur başına bir sayı karşılaştırması;
+    // silme yalnızca tazelemede (15 dk'da bir) olur.
+    const surum = this.transfers.surum;
+    if (surum !== this.transferSurumu) {
+      this.transferSurumu = surum;
+      this.imkansizRotaSonu.fill(0);
     }
 
     for (let d = 0; d < dirty.length; d++) {
@@ -650,6 +717,20 @@ export class Scanner {
         continue;
       }
 
+      const buyV = bestAskSlot % venueCount;
+      const sellV = bestBidSlot % venueCount;
+
+      // İmkânsız rota HAFIZASI (bkz. `TRANSFER_HAFIZA_MS`): bu (çift, alış,
+      // satış) üçlüsü tutardan bağımsız bir sebeple transfer edilemez
+      // bulunduysa tablo tazelenene kadar kuyruğa girmez. Kapsam kaybı değil:
+      // aynı aday bugün de Aşama 2'de aynı sebeple eleniyordu, yalnızca
+      // derinlik ve quote harcandıktan SONRA.
+      const rotaIdx = pairIndex * venueCount * venueCount + buyV * venueCount + sellV;
+      if (now < this.imkansizRotaSonu[rotaIdx]!) {
+        this.transferHafizasiAtlanan++;
+        continue;
+      }
+
       // Quote ile doğrulanan DEX bacağı (jupiter, raydium) varsa ek şart:
       // DEX fiyatı son kuyruğa alınmadan beri YENİDEN YAZILMADIYSA atla.
       //
@@ -681,8 +762,6 @@ export class Scanner {
       //
       // `>=`: aynı milisaniyede yazılmış fiyatın kuyruğa alınmadan önce mi
       // sonra mı geldiği ayırt edilemez; belirsizlikte yeniden doğrula.
-      const buyV = bestAskSlot % venueCount;
-      const sellV = bestBidSlot % venueCount;
       const buyDex = this.venueIsDex[buyV] === 1;
       const sellDex = this.venueIsDex[sellV] === 1;
       if (
@@ -794,6 +873,29 @@ export class Scanner {
     const [coin, quote] = c.pair.split('/') as [string, string];
     const tradeSize = this.cfg.scan.tradeSizeQuote;
     const now = Date.now();
+    const venueCount = this.store.venueCount;
+
+    // --- Transfer ön kontrolü — HER await'TEN ÖNCE ------------------------
+    // Ortak zincir, alışta çekim, satışta yatırma ve adres çapraz kontrolü
+    // tutardan bağımsızdır; bunlardan biri tutmuyorsa REST defteri ya da DEX
+    // quote'u çekmenin anlamı yok. Ölçüldü: transfer elemesi doğrulananların
+    // ~%60'ıydı ve hepsi kotayı harcadıktan sonra yapılıyordu. Tutara bağlı
+    // kısım (asgari çekim, ücret) aşağıda `pickChain`'de kalıyor.
+    const onKontrol = this.rotaOnKontrol(coin, c.buyVenue, c.sellVenue, this.store.ask(c.buySlot));
+    if (!onKontrol.ok) {
+      if (onKontrol.reason === 'address') this.rejectedByAddress++;
+      else this.rejectedByTransfer++;
+      // Yalnızca KESİN cevap hatırlanır: sorgusu kuyrukta olan Kraken
+      // yatırması 15 dk kör bırakılmamalı — cevap saniyeler içinde gelir.
+      if (onKontrol.kesin) {
+        const idx =
+          c.pairIndex * venueCount * venueCount +
+          (c.buySlot % venueCount) * venueCount +
+          (c.sellSlot % venueCount);
+        this.imkansizRotaSonu[idx] = now + TRANSFER_HAFIZA_MS;
+      }
+      return;
+    }
 
     const buyRecv = this.store.recvTs(c.buySlot);
     const sellRecv = this.store.recvTs(c.sellSlot);
@@ -821,7 +923,6 @@ export class Scanner {
     //
     // Sessizliği ayrıca kötüydü: eleme `rejectedByStale`'e yazıldığı için
     // panelde gerçek CEX bayatlığından ayırt edilemiyordu.
-    const venueCount = this.store.venueCount;
     if (
       !this.slotTaze(buyRecv, c.buySlot % venueCount, now) ||
       !this.slotTaze(sellRecv, c.sellSlot % venueCount, now)
@@ -1421,12 +1522,8 @@ export class Scanner {
    * 0.1 USD, başka bir ağda 15 USD çekim ücretine sahip olabilir ve yanlış
    * ağ seçimi kârı tamamen yer.
    *
-   * Dört durum var:
-   *   CEX→CEX  her iki borsada da ortak, çekimi/yatırması açık bir zincir
-   *   CEX→DEX  DEX'in zinciri zorunlu; CEX'ten o zincirde çekim açık olmalı
-   *   DEX→CEX  DEX'in zinciri zorunlu; CEX'e o zincirde yatırma açık olmalı
-   *   DEX→DEX  aynı zincirdeyse transfer YOK (en temiz durum, sadece gas);
-   *            farklı zincirlerse köprü gerekir — v1 bunu desteklemiyor.
+   * Tutardan bağımsız eleme `rotaOnKontrol`'de; burada yalnızca tutara bağlı
+   * kısım (asgari çekim) ve ücrete göre seçim yapılır.
    *
    * @param withdrawAmount Alış borsasından çekilecek base miktarı. Zincirin
    *   asgari çekim tutarını karşılamayan aday elenir.
@@ -1438,65 +1535,15 @@ export class Scanner {
     priceQuote: number,
     withdrawAmount: number,
   ): ChainPick {
-    const buyChain = isDex(buyVenue) ? DEX_CHAIN[buyVenue as DexId] : null;
-    const sellChain = isDex(sellVenue) ? DEX_CHAIN[sellVenue as DexId] : null;
-
-    // DEX → DEX
-    if (buyChain && sellChain) {
-      if (buyChain !== sellChain) {
-        // Köprü maliyeti ve gecikmesi modellenmeden bu fırsat güvenilir değil.
-        return { ok: false, reason: 'transfer' };
-      }
-      return {
-        ok: true,
-        chain: buyChain,
-        withdrawFee: 0,
-        verified: true,
-        unverifiedVenues: [],
-      };
-    }
-
-    // DEX bacağı varsa zincir sabittir; yoksa ortak zincirler aranır.
-    const candidates = buyChain
-      ? [buyChain]
-      : sellChain
-        ? [sellChain]
-        : this.transfers.chainsFor(coin);
-
-    if (candidates.length === 0) return { ok: false, reason: 'transfer' };
+    const on = this.rotaOnKontrol(coin, buyVenue, sellVenue, priceQuote);
+    if (!on.ok) return { ok: false, reason: on.reason };
 
     let best: Extract<ChainPick, { ok: true }> | null = null;
-
-    // Kimlik çakışması yüzünden elenen zincir oldu mu? Sayaç yalnızca HİÇBİR
-    // zincir kalmadığında artar: başka bir zincirde adresler uyuşuyorsa fırsat
-    // reddedilmiş değildir, yalnızca rota değişmiştir.
-    let addressConflict = false;
-
-    for (const chain of candidates) {
+    for (const { chain, from, to } of on.zincirler) {
       const unverified: VenueId[] = [];
       let withdrawFee = 0;
 
-      // KİMLİK KONTROLÜ — her şeyden önce.
-      //
-      // İki borsanın aynı ticker'ı farklı token'a verdiği ölçülmüş bir
-      // gerçektir (DEFAI/solana: kucoin `hwfh2kn2…`, gate `8zx6ecj3…`).
-      // Böyle bir çiftte "fırsat" transfer edilemez: gönderilen token
-      // karşı borsada hiçbir şeye karşılık gelmez.
-      //
-      // Yalnızca İKİ TARAF DA adres bildirdiğinde karar veriyoruz. Bilinmeyen
-      // adres çakışma sayılmaz (Bybit bu alanı hiç vermiyor; öyle sayılsaydı
-      // Bybit'in bütün rotaları elenirdi).
-      const buyAddr = this.venueAddress(buyVenue, coin, chain, priceQuote);
-      const sellAddr = this.venueAddress(sellVenue, coin, chain, priceQuote);
-      if (buyAddr && sellAddr && buyAddr !== sellAddr) {
-        addressConflict = true;
-        continue;
-      }
-
-      if (isCex(buyVenue)) {
-        // Varlığı bu borsadan çekebilmeliyiz.
-        const from = this.transfers.lookup(buyVenue, coin, chain, priceQuote);
-        if (!from.withdrawEnabled) continue;
+      if (from) {
         // Asgari çekim tutarı: borsa bu miktarın ALTINI göndermez. Kontrol
         // edilmezse hiç gerçekleştirilemeyecek bir transfer fırsat olarak
         // yayınlanır — "ulaşılamaz fırsat" hata sınıfının ta kendisi. Bilgi
@@ -1505,13 +1552,7 @@ export class Scanner {
         withdrawFee = from.withdrawFee;
         if (!from.verified) unverified.push(buyVenue);
       }
-
-      if (isCex(sellVenue)) {
-        // Varlığı bu borsaya yatırabilmeliyiz.
-        const to = this.transfers.lookup(sellVenue, coin, chain, priceQuote);
-        if (!to.depositEnabled) continue;
-        if (!to.verified) unverified.push(sellVenue);
-      }
+      if (to && !to.verified) unverified.push(sellVenue);
 
       if (!best || withdrawFee < best.withdrawFee) {
         best = {
@@ -1528,7 +1569,110 @@ export class Scanner {
     // Gerekçe dönüş değerinde taşınıyor, sayaç burada artırılmıyor: sayacı hem
     // burada hem çağıran tarafta artırmak aynı elemeyi iki kovaya birden
     // yazardı ve panelde toplam eleme sayısı gerçeğin iki katı görünürdü.
-    return { ok: false, reason: addressConflict ? 'address' : 'transfer' };
+    return { ok: false, reason: on.adresCakismasi ? 'address' : 'transfer' };
+  }
+
+  /**
+   * Rotanın TUTARDAN BAĞIMSIZ kısmı: ortak zincir, alışta çekim açık, satışta
+   * yatırma açık, adres çapraz kontrolü.
+   *
+   * `pickChain` ile `verify()` başındaki ön kontrol AYNI fonksiyonu kullanıyor:
+   * kural iki yerde ayrı yazılsaydı biri güncellenip diğeri unutulduğunda ön
+   * kontrol, `pickChain`'in geçireceği bir rotayı sessizce (ve 15 dk boyunca
+   * hatırlayarak) elerdi.
+   *
+   * Dört durum var:
+   *   CEX→CEX  her iki borsada da ortak, çekimi/yatırması açık bir zincir
+   *   CEX→DEX  DEX'in zinciri zorunlu; CEX'ten o zincirde çekim açık olmalı
+   *   DEX→CEX  DEX'in zinciri zorunlu; CEX'e o zincirde yatırma açık olmalı
+   *   DEX→DEX  aynı zincirdeyse transfer YOK (en temiz durum, sadece gas);
+   *            farklı zincirlerse köprü gerekir — v1 bunu desteklemiyor.
+   */
+  private rotaOnKontrol(
+    coin: string,
+    buyVenue: VenueId,
+    sellVenue: VenueId,
+    priceQuote: number,
+  ): RotaOnKontrol {
+    const buyChain = isDex(buyVenue) ? DEX_CHAIN[buyVenue as DexId] : null;
+    const sellChain = isDex(sellVenue) ? DEX_CHAIN[sellVenue as DexId] : null;
+
+    // DEX → DEX
+    if (buyChain && sellChain) {
+      if (buyChain !== sellChain) {
+        // Köprü maliyeti ve gecikmesi modellenmeden bu fırsat güvenilir değil.
+        return { ok: false, reason: 'transfer', kesin: true };
+      }
+      return {
+        ok: true,
+        zincirler: [{ chain: buyChain, from: null, to: null }],
+        adresCakismasi: false,
+      };
+    }
+
+    // DEX bacağı varsa zincir sabittir; yoksa ortak zincirler aranır.
+    const candidates = buyChain
+      ? [buyChain]
+      : sellChain
+        ? [sellChain]
+        : this.transfers.chainsFor(coin);
+
+    if (candidates.length === 0) return { ok: false, reason: 'transfer', kesin: true };
+
+    const zincirler: { chain: ChainId; from: TransferInfo | null; to: TransferInfo | null }[] =
+      [];
+
+    // Kimlik çakışması yüzünden elenen zincir oldu mu? Gerekçe yalnızca HİÇBİR
+    // zincir kalmadığında 'address' olur: başka bir zincirde adresler
+    // uyuşuyorsa fırsat reddedilmiş değildir, yalnızca rota değişmiştir.
+    let adresCakismasi = false;
+    // Bir zincir CEVAP yüzünden değil, cevabı henüz gelmediği için mi elendi.
+    let bilinmeyen = false;
+
+    for (const chain of candidates) {
+      // KİMLİK KONTROLÜ — her şeyden önce.
+      //
+      // İki borsanın aynı ticker'ı farklı token'a verdiği ölçülmüş bir
+      // gerçektir (DEFAI/solana: kucoin `hwfh2kn2…`, gate `8zx6ecj3…`).
+      // Böyle bir çiftte "fırsat" transfer edilemez: gönderilen token
+      // karşı borsada hiçbir şeye karşılık gelmez.
+      //
+      // Yalnızca İKİ TARAF DA adres bildirdiğinde karar veriyoruz. Bilinmeyen
+      // adres çakışma sayılmaz (Bybit bu alanı hiç vermiyor; öyle sayılsaydı
+      // Bybit'in bütün rotaları elenirdi).
+      const buyAddr = this.venueAddress(buyVenue, coin, chain, priceQuote);
+      const sellAddr = this.venueAddress(sellVenue, coin, chain, priceQuote);
+      if (buyAddr && sellAddr && buyAddr !== sellAddr) {
+        adresCakismasi = true;
+        continue;
+      }
+
+      let from: TransferInfo | null = null;
+      if (isCex(buyVenue)) {
+        // Varlığı bu borsadan çekebilmeliyiz.
+        from = this.transfers.lookup(buyVenue, coin, chain, priceQuote);
+        if (!from.withdrawEnabled) continue;
+      }
+
+      let to: TransferInfo | null = null;
+      if (isCex(sellVenue)) {
+        // Varlığı bu borsaya yatırabilmeliyiz.
+        to = this.transfers.lookup(sellVenue, coin, chain, priceQuote);
+        if (!to.depositEnabled) {
+          if (to.depositBilinmiyor) bilinmeyen = true;
+          continue;
+        }
+      }
+
+      zincirler.push({ chain, from, to });
+    }
+
+    if (zincirler.length > 0) return { ok: true, zincirler, adresCakismasi };
+    return {
+      ok: false,
+      reason: adresCakismasi ? 'address' : 'transfer',
+      kesin: !bilinmeyen,
+    };
   }
 
   /**

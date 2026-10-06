@@ -190,6 +190,13 @@ export interface TransferInfo {
    * null'ı çakışma sayan bir kontrol Bybit'in tüm rotalarını elerdi.
    */
   readonly address: string | null;
+  /**
+   * `true`: `depositEnabled = false` bir CEVAP değil, cevabın henüz
+   * gelmediğini söylüyor (Kraken yatırma durumu talep üzerine çekiliyor,
+   * bilinmeyen = kapalı). Tarayıcı imkânsız rotayı tablo tazelenene kadar
+   * hatırlıyor; bu işaret olmadan sorulmamış bir coin 15 dk kör kalırdı.
+   */
+  readonly depositBilinmiyor?: boolean;
 }
 
 // ---------------------------------------------------------------------------
