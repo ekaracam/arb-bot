@@ -10,7 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { esc, formatOpportunity, formatRow } from '../src/notify/format.ts';
+import { esc, formatOpportunity, formatRow, level, YESIL_PCT } from '../src/notify/format.ts';
 import type { Opportunity, PairKey } from '../src/core/types.ts';
 
 /** Telegram MarkdownV2'nin kaçış zorunlu kıldığı karakterlerin tamamı. */
@@ -212,4 +212,11 @@ test('kaçış doğrulayıcısı BOZUK metni gerçekten yakalar', () => {
   // `String.raw`: düz dizide '\(' TypeScript'te GEÇERSİZ bir kaçıştır ve
   // sessizce '(' olur — asıl hatanın ('\+' → '+') birebir aynısı.
   assert.equal(kacirilmamis(biciminiSok(String.raw`🔍 Çapraz \(cow\)`)).length, 0);
+});
+
+test('level: renk eşikleri %1.8 yeşil, %3 sarı, %7 kırmızı', () => {
+  assert.equal(YESIL_PCT, 1.8);
+  assert.equal(level(0.018), '🟢');
+  assert.equal(level(0.03), '🟡');
+  assert.equal(level(0.07), '🔴');
 });

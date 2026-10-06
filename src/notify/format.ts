@@ -23,10 +23,15 @@ function price(n: number): string {
   return esc(n.toFixed(d));
 }
 
-function level(netPct: number): string {
+// Renk eşikleri (net %) kullanıcının seçimi; YEŞİL altı Telegram'a ve sesli uyarıya gitmez.
+export const YESIL_PCT = 1.8;
+export const SARI_PCT = 3;
+export const KIRMIZI_PCT = 7;
+
+export function level(netPct: number): string {
   const p = netPct * 100;
-  if (p >= 3) return '🔴';
-  if (p >= 1) return '🟡';
+  if (p >= KIRMIZI_PCT) return '🔴';
+  if (p >= SARI_PCT) return '🟡';
   return '🟢';
 }
 

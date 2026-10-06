@@ -18,6 +18,7 @@ import { createFeed } from './feeds/cex/index.ts';
 import { TransferInfoProvider, clockSkews } from './engine/transfer-info.ts';
 import { Scanner } from './engine/scanner.ts';
 import { TelegramNotifier } from './notify/telegram.ts';
+import { YESIL_PCT } from './notify/format.ts';
 import { SoundAlert, sesCihazlari } from './notify/sound.ts';
 import { Renderer, type ChainStatus, type RenderState } from './ui/renderer.ts';
 import { NdjsonWriter } from './persist/ndjson.ts';
@@ -41,6 +42,7 @@ import {
   DEX_CHAIN,
   DEX_IDS,
   EXCLUDED_BASES,
+  isDex,
   type CexId,
   type DexId,
   type Feed,
@@ -427,7 +429,8 @@ async function main(): Promise<void> {
     // 50 ms'de bir yeniden üretilir, her tekrarda çalmak sesi bilgi taşımayan
     // bir uğultuya çevirirdi. Kendi cooldown'ı ayrıca farklı coinlerin aynı
     // anda eşiği geçtiği durumu sınırlıyor.
-    if (fresh) sound.alert();
+    const bildirimEsigiGecti = opp.netPct * 100 >= YESIL_PCT;
+    if (fresh && bildirimEsigiGecti) sound.alert();
 
     // Risk kararı v1'de UYGULANMAZ, yalnızca kaydedilir. Amaç, otomasyona
     // geçmeden önce limitlerin gerçek veriyle kalibre edilebilmesi.
@@ -444,7 +447,7 @@ async function main(): Promise<void> {
     // aynı fırsatın kopyalarıyla dolmasını önler.
     if (fresh) persist?.write(opp);
 
-    if (telegram?.notify(opp)) {
+    if (bildirimEsigiGecti && telegram?.notify(opp)) {
       log(`📤 ${opp.coin} %${(opp.netPct * 100).toFixed(2)} → telegram`);
     }
 
@@ -516,6 +519,13 @@ async function main(): Promise<void> {
           .map((f) => f.health())
           .filter((h) => h.state !== 'live')
           .map((h) => `${h.venue}:${h.state}`);
+        const dexNotlari = (): string => {
+          const notlar = feeds
+            .map((f) => f.health())
+            .filter((h) => isDex(h.venue) && h.lastError)
+            .map((h) => `${h.venue}: ${h.lastError!.slice(0, 120)}`);
+          return notlar.length > 0 ? ` DEX_NOT[${notlar.join(' | ')}]` : '';
+        };
         runLog(
           `DURUM tur=${s.evalCount} aday=${s.candidateCount} sinyal=${s.opportunityCount} ` +
             `netHesaplanan=${s.netHesaplanan} ` +
@@ -523,7 +533,8 @@ async function main(): Promise<void> {
               Number.isFinite(s.enIyiNetPct) ? `%${(s.enIyiNetPct * 100).toFixed(3)}` : 'yok'
             } ` +
             `kuyruk=${s.queueDepth} atılan=${s.droppedCount} ` +
-            `elenen[derinlik=${s.rejectedByDepth} transfer=${s.rejectedByTransfer} ` +
+            `elenen[derinlik=${s.rejectedByDepth} defterCekilemedi=${s.rejectedByDepthFetch} ` +
+            `transfer=${s.rejectedByTransfer} ` +
             `adres=${s.rejectedByAddress} bayat=${s.rejectedByStale} ` +
             `makulDegil=${s.makulDegilAday} inceHavuz=${s.rejectedByImpact}/${s.inceHavuzOnceliksiz}] ` +
             `dexQuote[${s.dexQuoteOk}/${s.dexQuoteTried} hata=${s.dexQuoteError}] ` +
@@ -540,7 +551,18 @@ async function main(): Promise<void> {
               ? ` TELEGRAM_HATA=${telegram.stats.failed}` +
                 (telegram.stats.lastError ? ` "${telegram.stats.lastError.slice(0, 80)}"` : '')
               : '') +
-            (bozuk.length > 0 ? ` FEED_SORUN=${bozuk.join(',')}` : ''),
+            (bozuk.length > 0 ? ` FEED_SORUN=${bozuk.join(',')}` : '') +
+            (s.rejectedByDepthFetch > 0 && s.lastDepthFetchError
+              ? ` sonDefterHata="${s.lastDepthFetchError.slice(0, 60)}"`
+              : '') +
+            // DEX feed'leri 'live' iken de teşhis taşıyor (tur süresi bütçeyi
+            // aşıyor, ince havuz…) — bunlar yalnızca panelde görünüyordu.
+            dexNotlari() +
+            // Hangi venue'nun okumaları bayat düşüyor — `bayat=` toplamının dökümü.
+            ` bayatOran[${s.venueBayatOrani
+              .filter((b) => b.toplam > 0)
+              .map((b) => `${b.venue}=%${(b.oran * 100).toFixed(0)}`)
+              .join(' ')}]`,
         );
         // Doğrulama bütçesini kimin yaktığı — "0 sinyal" teşhisinin ikinci
         // yarısı. Toplam sayı nereye gittiğini söylemiyor, bu döküm söylüyor.
