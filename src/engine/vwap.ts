@@ -126,7 +126,11 @@ export function l1Fill(price: number, qty: number, neededBase: number): FillResu
     vwap: price,
     filledBase,
     filledQuote: filledBase * price,
-    complete: qty >= neededBase,
+    // Küçük tolerans: EVM feed'i `askQty = tradeSize / ask` yazıyor ve
+    // scanner `neededBase = tradeSize / ask` hesaplıyor — kayan noktada ikisi
+    // her zaman eşit çıkmıyor (1e6 rastgele denemede %7.6 `>`), tam
+    // karşılaştırma bacağı rastgele eksik sayıyordu.
+    complete: qty >= neededBase * (1 - 1e-9),
     slippage: 0,
   };
 }

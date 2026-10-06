@@ -100,3 +100,18 @@ test('vekil orijinal USD kaydını SİLMEZ', () => {
   // `quotes` listesine USD eklenirse o çift ayrıca taranabilmeli.
   assert.ok(out.some((m) => m.quote === 'USD' && m.pair === 'KTA/USD'));
 });
+
+test('kaldıraçlı kalıbı: sonek ancak taban aynı borsada listeliyse sayılır (SYRUP)', () => {
+  // İkinci ölçülen kurban: SYRUP ("SYR"+"UP") üç karakter şartını geçtiği için
+  // kaldıraçlı sayılıyor ve hiç taranmıyordu. Kimlik kuralı: taban listeli mi?
+  const bases = new Set(['BTC', 'ETH', 'OP', 'SYRUP', 'JUP', 'GROUP', 'SOL']);
+  for (const t of ['BTC3L', 'ETHUP', 'OP3L', 'SOLDOWN', 'ETHBULL']) {
+    assert.equal(isLeveragedTicker(t, bases), true, `${t} kaldıraçlı sayılmalıydı`);
+  }
+  for (const t of ['SYRUP', 'JUP', 'GROUP', 'STARTUP', 'PITBULL', 'SOUP']) {
+    assert.equal(isLeveragedTicker(t, bases), false, `${t} elenmemeliydi`);
+  }
+  // Küme verilmezse yaklaşık kalıp: taban ≥ 3 karakter.
+  assert.equal(isLeveragedTicker('BTC3L'), true);
+  assert.equal(isLeveragedTicker('JUP'), false);
+});

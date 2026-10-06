@@ -100,6 +100,7 @@ export class DepthCache {
   private hits = 0;
   private misses = 0;
   private errors = 0;
+  private lastError: string | null = null;
 
   constructor(opts: DepthCacheOptions = {}) {
     // Derinlik hızla değişir; 2 saniyeden eski snapshot'a güvenmeyiz.
@@ -107,8 +108,8 @@ export class DepthCache {
     this.levels = opts.levels ?? 20;
   }
 
-  get stats(): { hits: number; misses: number; errors: number } {
-    return { hits: this.hits, misses: this.misses, errors: this.errors };
+  get stats(): { hits: number; misses: number; errors: number; lastError: string | null } {
+    return { hits: this.hits, misses: this.misses, errors: this.errors, lastError: this.lastError };
   }
 
   async get(
@@ -170,8 +171,9 @@ export class DepthCache {
         asks: toLevels(parsed.asks),
         ts: Date.now(),
       };
-    } catch {
+    } catch (e) {
       this.errors++;
+      this.lastError = `${venue} ${venueSymbol}: ${(e as Error).message.slice(0, 120)}`;
       return null;
     }
   }

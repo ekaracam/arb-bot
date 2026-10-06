@@ -74,11 +74,19 @@ export class RateCounter {
 
   perSec(now: number): number {
     const sec = Math.floor(now / 1000);
+    const L = this.buckets.length;
+    // Kovalar yalnızca `tick()` sırasında temizleniyor; feed sustuğunda hiç
+    // tick gelmediği için eski değerler duruyor ve bir saat sessiz feed bile
+    // eski hızını gösteriyordu — "sessiz ölüm" sınıfının panelde canlı
+    // görünmesi demek. Pencereden eski son tick → 0; aradaki saniyeler ise
+    // tick almadıkları için (kova temizlenmemiş olsa da) sıfır sayılır.
+    if (sec - this.lastSec >= L) return 0;
     // Mevcut saniye henüz dolmadığı için onu hariç tutup önceki 9 saniyeye bakarız.
     let sum = 0;
     let n = 0;
-    for (let i = 1; i < this.buckets.length; i++) {
-      sum += this.buckets[(sec - i + this.buckets.length * 2) % this.buckets.length]!;
+    for (let i = 1; i < L; i++) {
+      const s = sec - i;
+      if (s <= this.lastSec) sum += this.buckets[((s % L) + L) % L]!;
       n++;
     }
     return n > 0 ? sum / n : 0;

@@ -84,6 +84,9 @@ export interface JupiterOptions {
   readonly priceSource?: SolanaPriceSource;
 }
 
+/** Art arda bu kadar kötü tur sonra durum `failed` olur (EVM/CoW ile aynı). */
+const KOTU_TUR_TOLERANSI = 3;
+
 export class SolanaMidFeed implements Feed {
   readonly venue: DexId;
   readonly chain: ChainId = 'solana';
@@ -159,7 +162,20 @@ export class SolanaMidFeed implements Feed {
     this.state = 'idle';
   }
 
+  /** Bir tur uçuştayken yenisi başlamasın (EVM/CoW feed'leriyle aynı kural). */
+  private polling = false;
+  /** Art arda kötü tur sayısı — tek hıçkırık paneli kızartmamalı. */
+  private badStreak = 0;
+
   private async poll(): Promise<void> {
+    // Jupiter'de bir tur 4 parça × (8 sn timeout × 2 deneme) sürebiliyor ve
+    // 11.4 sn'lik periyodu aşıyor. Koruma yokken turlar üst üste biniyor,
+    // yavaş gelen ESKİ tur yeni fiyatın üstüne TAZE zaman damgasıyla
+    // yazıyordu (ölçüldü: maxInflight 2, son yazılan ask eski turun değeri).
+    // Üstüne binen turlar Aşama 2 ile aynı kovada yarışıp doğrulamayı da aç
+    // bırakıyordu — `taramaPayi` gerekçesinin tam tersi.
+    if (this.polling) return;
+    this.polling = true;
     try {
       const fiyatlar = await this.source.fetchPrices(this.tokens.map((t) => t.mint));
 
@@ -199,7 +215,12 @@ export class SolanaMidFeed implements Feed {
 
       this.rate.tick(now);
       this.lastTickTs = now;
-      this.state = written > 0 ? 'live' : 'failed';
+      if (written > 0) {
+        this.state = 'live';
+        this.badStreak = 0;
+      } else if (++this.badStreak >= KOTU_TUR_TOLERANSI) {
+        this.state = 'failed';
+      }
       // Sıra ÖNEMLİ: eleme sebebi, "kaynak fiyat vermedi" sebebinden ÖNCE
       // kontrol edilir. Ters sırada, tüm tokenlar filtreye takıldığında panel
       // "kaynak hiçbir fiyat döndürmedi" diyordu — oysa kaynak döndürdü, biz
@@ -218,8 +239,12 @@ export class SolanaMidFeed implements Feed {
     } catch (e) {
       this.errorCount++;
       this.lastError = (e as Error).message;
-      // Tek bir hatalı tur feed'i öldürmez; bir sonraki turda tekrar denenir.
-      if (this.state !== 'live') this.state = 'failed';
+      // Tek bir hatalı tur feed'i öldürmez; ama bir kez `live` olan feed'in
+      // sonsuza kadar `live` kalması da yanlıştı — `price/v3` sürekli patlasa
+      // bile panel "live" diyordu. EVM/CoW ile aynı tolerans.
+      if (++this.badStreak >= KOTU_TUR_TOLERANSI) this.state = 'failed';
+    } finally {
+      this.polling = false;
     }
   }
 

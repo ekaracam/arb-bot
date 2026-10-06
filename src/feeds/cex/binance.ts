@@ -98,5 +98,6 @@ export class BinanceFeed extends BaseCexFeed {
     if (exchangeTs > 0) this.recordLatency(exchangeTs, recvTs);
 
     this.store.write(slot, +t.b, +t.B, +t.a, +t.A, exchangeTs, recvTs);
+    this.markData(recvTs);
   }
 }

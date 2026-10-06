@@ -44,8 +44,36 @@ const CHAIN_ALIASES: Record<string, ChainId> = {
 
 export function normalizeChain(raw: string | undefined | null): ChainId | null {
   if (!raw) return null;
-  const key = raw.toLowerCase().replace(/[\s_\-()]/g, '');
-  return CHAIN_ALIASES[key] ?? null;
+  const dene = (s: string): ChainId | null =>
+    CHAIN_ALIASES[s.toLowerCase().replace(/[\s_\-()]/g, '')] ?? null;
+  const direkt = dene(raw);
+  if (direkt) return direkt;
+  // MEXC "Solana(SOL)" / "Arbitrum One(ARB)" biçimini kullanıyor: parantezler
+  // silinince "solanasol" oluyor ve hiçbir takma ada uymuyordu. Önce
+  // parantezin İÇİ (kısa kod), sonra ÖNÜ (uzun ad) denenir.
+  const m = /^([^(]*)\(([^)]*)\)/.exec(raw);
+  if (m) return dene(m[2]!) ?? dene(m[1]!);
+  return null;
+}
+
+/**
+ * Binance/MEXC ağ kaydından zincir kimliği.
+ *
+ * Sıra ÖNEMLİ ve bir kez yanlıştı: `network ?? netWork` yazılınca `network`
+ * doluysa `netWork` hiç denenmiyordu. MEXC `network`'e "Solana(SOL)" (o
+ * dönem tanınmıyordu), `netWork`'e "SOL" yazıyor; sonuç, MEXC'in TÜM
+ * Solana/Arbitrum satırlarının tabloya girmemesiydi. "Suskunluk = kapalı"
+ * kuralı yüzünden bu, MEXC'in o zincirlerdeki her rotasının sessizce
+ * `rejectedByTransfer`'e düşmesi demekti — veride anahtar sonrası
+ * `mexc|solana` = 0, `mexc|arbitrum` = 0 (anahtar öncesi 114/151).
+ * Her alan AYRI AYRI denenir; ilk tanınan kazanır.
+ */
+export function binanceStyleChain(n: {
+  network?: string;
+  netWork?: string;
+  name?: string;
+}): ChainId | null {
+  return normalizeChain(n.netWork) ?? normalizeChain(n.network) ?? normalizeChain(n.name);
 }
 
 interface ChainEntry {
@@ -142,7 +170,7 @@ interface GateCurrency {
   }[];
 }
 
-const GATE_OLU_KAYIT = /_(?:OLD\d*|\d+)$/i;
+export const GATE_OLU_KAYIT = /_(?:OLD\d*|\d+)$/i;
 
 /**
  * Aynı coin/zincir için birden fazla Gate kaydı geldiğinde KÖTÜMSER birleştirme.
@@ -399,7 +427,7 @@ async function fetchBinanceStyle(
   const table: CoinTable = new Map();
   for (const c of list ?? []) {
     for (const n of c.networkList ?? []) {
-      const chain = normalizeChain(n.network ?? n.netWork) ?? normalizeChain(n.name);
+      const chain = binanceStyleChain(n);
       if (!chain) continue;
       addEntry(table, c.coin, chain, {
         withdrawEnabled: n.withdrawEnable === true,
@@ -756,15 +784,50 @@ async function fetchKrakenDepositChains(
   return out;
 }
 
-function krakenAssetToTicker(asset: string): string {
+/**
+ * Kraken'in v1 döneminden kalma önekli varlık kodları.
+ *
+ * Eskiden "4 harfli ve X/Z ile başlıyorsa ilk harfi at" KALIBI kullanılıyordu
+ * ve bu, öneksiz her 4 harfli coini bozuyordu: ZEUS→EUS, ZORA→ORA, ZETA→ETA,
+ * ZBCN→BCN, XAUT→AUT, XTER→TER. Sembol kaydı `wsname`'den "ZEUS" okuduğu için
+ * `lookup('kraken','ZEUS')` tabloda hiçbir şey bulamıyor, çekim/yatırma
+ * `false` dönüyor ve o coinlerin tüm Kraken rotaları sessizce eleniyordu
+ * (anahtar sonrası veride Kraken bacaklı bu sınıftan 0 sinyal). Önek yalnızca
+ * bu sonlu listede var; kalıp yerine liste.
+ */
+const KRAKEN_ESKI_KODLAR: Readonly<Record<string, string>> = {
+  XXBT: 'BTC',
+  XBT: 'BTC',
+  XETH: 'ETH',
+  XXDG: 'DOGE',
+  XDG: 'DOGE',
+  XLTC: 'LTC',
+  XXMR: 'XMR',
+  XXRP: 'XRP',
+  XXLM: 'XLM',
+  XZEC: 'ZEC',
+  XETC: 'ETC',
+  XMLN: 'MLN',
+  XREP: 'REP',
+  XICN: 'ICN',
+  XNMC: 'NMC',
+  XXVN: 'XVN',
+  XDAO: 'DAO',
+  ZUSD: 'USD',
+  ZEUR: 'EUR',
+  ZGBP: 'GBP',
+  ZJPY: 'JPY',
+  ZCAD: 'CAD',
+  ZAUD: 'AUD',
+  ZKRW: 'KRW',
+};
+
+export function krakenAssetToTicker(asset: string): string {
   let a = asset.toUpperCase();
   // ".S" / ".M" gibi staking varyantları ayrı varlıklar — taban kodu al.
   const dot = a.indexOf('.');
   if (dot > 0) a = a.slice(0, dot);
-  if (a.length === 4 && (a.startsWith('X') || a.startsWith('Z'))) a = a.slice(1);
-  if (a === 'XBT') return 'BTC';
-  if (a === 'XDG') return 'DOGE';
-  return a;
+  return KRAKEN_ESKI_KODLAR[a] ?? a;
 }
 
 const PRIVATE_FETCHERS: Partial<Record<CexId, (c: ApiCredentials) => Promise<CoinTable>>> = {
@@ -919,8 +982,38 @@ export class TransferInfoProvider {
   private readonly privateErrors = new Map<CexId, string>();
   /** Coin'in hangi zincirlerde var olduğuna dair birleşik görünüm. */
   private known: CoinTable = new Map();
-  private fetchedAt = 0;
+  /**
+   * Kaynak BAŞINA son başarılı çekim anı.
+   *
+   * Tek bir `fetchedAt`, `refresh()`'in sonunda KOŞULSUZ yazılıyordu: KuCoin,
+   * Gate ve imzalı uçların hepsi düşse bile tablo "taze" sayılıyor,
+   * `tableAgeMs` "son başarılı tazeleme" değil "son deneme" ölçüyor ve
+   * `TRANSFER_TABLE_STALE_MS` uyarısı ilk başarılı açılıştan sonra HİÇ
+   * tetiklenemiyordu. Kısmi arıza (yalnızca KuCoin düşmüş) da görünmüyordu.
+   * Artık her kaynak kendi zamanını taşır; tablo yaşı, bir kez de olsa
+   * başarılı olmuş kaynakların EN ESKİSİDİR — hiç çalışmamış bir anahtar
+   * tabloyu bayat göstermez (o zaten `credentialErrors`'ta).
+   */
+  private kucoinAt = 0;
+  private gateAt = 0;
+  private readonly privateAt = new Map<CexId, number>();
   private lastError: string | null = null;
+
+  /** Bir kez de olsa başarılı olmuş kaynakların en eski çekim anı; hiç yoksa 0. */
+  private get fetchedAt(): number {
+    let enEski = Number.POSITIVE_INFINITY;
+    for (const t of [this.kucoinAt, this.gateAt, ...this.privateAt.values()]) {
+      if (t > 0 && t < enEski) enEski = t;
+    }
+    return Number.isFinite(enEski) ? enEski : 0;
+  }
+
+  /** Bu borsanın kendi tablosunun çekim anı; kendi tablosu yoksa genel yaş. */
+  private fetchedAtFor(venue: CexId): number {
+    if (venue === 'kucoin') return this.kucoinAt;
+    if (venue === 'gate') return this.gateAt;
+    return this.privateAt.get(venue) ?? this.fetchedAt;
+  }
 
   // --- Kraken yatırma durumu (TALEP ÜZERİNE, coin bazında) -----------------
   //
@@ -994,8 +1087,15 @@ export class TransferInfoProvider {
       ...keyedVenues.map((v) => withRetry(() => PRIVATE_FETCHERS[v]!(creds[v]!))),
     ]);
 
-    if (k.status === 'fulfilled') this.kucoin = k.value;
-    if (g.status === 'fulfilled') this.gate = g.value;
+    const simdi = Date.now();
+    if (k.status === 'fulfilled') {
+      this.kucoin = k.value;
+      this.kucoinAt = simdi;
+    }
+    if (g.status === 'fulfilled') {
+      this.gate = g.value;
+      this.gateAt = simdi;
+    }
 
     const errs: string[] = [];
     if (k.status === 'rejected') errs.push(`kucoin: ${(k.reason as Error).message}`);
@@ -1034,6 +1134,7 @@ export class TransferInfoProvider {
       const res = privates[i]!;
       if (res.status === 'fulfilled' && res.value.size > 0) {
         this.privateTables.set(venue, res.value);
+        this.privateAt.set(venue, simdi);
         this.privateErrors.delete(venue);
       } else {
         // Eski tablo varsa onu korur, yoksa borsa doğrulanmamış kalır.
@@ -1081,7 +1182,6 @@ export class TransferInfoProvider {
       }
     }
     this.known = merged;
-    this.fetchedAt = Date.now();
   }
 
   async refreshIfStale(): Promise<void> {
@@ -1140,7 +1240,7 @@ export class TransferInfoProvider {
         // Kraken'in yatırma ucu çalışmıyorsa durumu ÇEKİMDEN varsaymış
         // oluyoruz — bu doğrulanmış bir kayıt değildir ve öyle görünmemeli.
         verified: !(venue === 'kraken' && this.krakenDepositUnavailable !== null),
-        fetchedAt: this.fetchedAt || now,
+        fetchedAt: this.fetchedAtFor(venue) || now,
         address: e?.address ?? null,
       };
     }

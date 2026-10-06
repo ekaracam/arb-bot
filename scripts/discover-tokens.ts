@@ -59,10 +59,12 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createPublicClient, http, parseAbi, type Address } from 'viem';
 import { base as baseChain, arbitrum as arbChain } from 'viem/chains';
-import { loadConfig, ROOT, type AppConfig } from '../src/core/config.ts';
+import { loadConfig, tokenTablosunuDogrula, ROOT, type AppConfig } from '../src/core/config.ts';
 import { httpJson } from '../src/core/http.ts';
 import { SymbolRegistry, isLeveragedTicker } from '../src/normalize/symbol-registry.ts';
-import { normalizeChain } from '../src/engine/transfer-info.ts';
+import { GATE_OLU_KAYIT, normalizeChain } from '../src/engine/transfer-info.ts';
+import { tasimaArizasiMi } from '../src/feeds/dex/evm.ts';
+import { DEVRE_DISI } from '../src/feeds/dex/index.ts';
 // ABI'ler feed'den geliyor: kopyalanırsa keşif ile bot zamanla farklı şeyi
 // sorar ve tablo "botun fiyatlayamadığı" tokenlarla dolar.
 import {
@@ -119,7 +121,9 @@ const PRICE_CHUNK = 40;
 const MAX_PRICE_DEVIATION = 0.25;
 
 /** EVM quoter probu için kullanılacak nominal büyüklük (USD). */
-const PROBE_USD = 100;
+// `main()` bunu `cfg.scan.tradeSizeQuote` ile ezer: keşif botla AYNI büyüklüğü
+// sormalı, yoksa $100'da geçen token $1000'da taşınmayabilir ve tabloya girer.
+let PROBE_USD = 1000;
 
 const ERC20_ABI = parseAbi([
   'function symbol() view returns (string)',
@@ -198,6 +202,12 @@ async function gateAdresleri(adaylar: Adaylar): Promise<number> {
 
   let n = 0;
   for (const c of list ?? []) {
+    // Delist edilmiş `_OLD` / `_1` kayıtları ESKİ kontratı taşır; taban ad
+    // ilk alt çizgiye kadar alındığı için `NEIRO_OLD`, `NEIRO`'nun oyu olarak
+    // sayılıyor ve ya sahte 2-2 beraberlik üretiyor ya da Gate tek kaynaksa
+    // ölü adres tabloya giriyordu. Transfer tablosu bunları zaten eliyor
+    // (`gateTablosunuKur`); keşif aynı kalıbı kullanır.
+    if (GATE_OLU_KAYIT.test(c.currency)) continue;
     // Gate'in currency kaydı "BTC_BSC" gibi zincire özel olabilir.
     const coin = (c.currency.split('_')[0] ?? c.currency).toUpperCase();
     for (const row of c.chains ?? []) {
@@ -720,19 +730,24 @@ async function evmDogrula(
         }
 
         // CoW: zincire hiç bağlanmıyor, çok adımlı rotayı solver kuruyor.
-        // Base'de asıl kapsamı açan bacak bu — doğrudan-USDC havuzu olmayan
-        // tokenlar yalnızca burada fiyatlanıyor.
-        try {
-          const out = await cowQuoter.quote(aday.adres, usdc.address, miktar);
-          if (out !== null && out > cikti) {
-            cikti = out;
-            rota = 'cow';
-            hataliBitti = false;
+        // YALNIZCA venue olarak açıksa keşfe girer: `cow-base` bugün
+        // `DEVRE_DISI` (çapraz kontrol olarak çalışıyor, geniş tarama olarak
+        // değil). Kapalıyken CoW'un bulduğu rota tabloya token sokuyordu ama
+        // bot o tokenı FİYATLAYAMIYORDU — her tur RPC yakıp `rotasiz()`'a
+        // düşüyordu. Keşif, botun yeteneğiyle aynı rotayı sormak zorunda.
+        if (!DEVRE_DISI.includes('cow-base')) {
+          try {
+            const out = await cowQuoter.quote(aday.adres, usdc.address, miktar);
+            if (out !== null && out > cikti) {
+              cikti = out;
+              rota = 'cow';
+              hataliBitti = false;
+            }
+          } catch {
+            // API arızası "havuz yok" ile karıştırılmamalı; zincir bacakları
+            // zaten denendi, sonuç onlardan gelir.
+            hataliBitti = true;
           }
-        } catch {
-          // API arızası "havuz yok" ile karıştırılmamalı; zincir bacakları
-          // zaten denendi, sonuç onlardan gelir.
-          hataliBitti = true;
         }
         continue;
       }
@@ -747,10 +762,17 @@ async function evmDogrula(
         });
         cikti = (result as readonly [bigint, number])[0];
         if (cikti > 0n) rota = 'camelot';
-      } catch {
-        hataliBitti = true;
+      } catch (e) {
+        // Revert = havuz yok (VERİ); yalnızca taşıma hatası RPC arızasıdır.
+        // Eskiden ikisi de "quote 3 denemede de hata verdi — public RPC
+        // şüpheli" diye raporlanıyordu; üç bağımsız uç birebir aynı sonucu
+        // verince anlaşıldı ki sonuç deterministik ve gerçek.
+        if (tasimaArizasiMi(e)) hataliBitti = true;
       }
-      if (cikti > 0n) continue;
+      // `continue` YOK: Camelot'ta toz bir doğrudan havuz sıfırdan büyük ama
+      // düşük fiyat döndürür, token sapma filtresine takılır. Bot zaten
+      // UniV3 tier'larını ve WETH rotasını da soruyor; en iyi çıktı seçilir
+      // (Base dalıyla aynı kural).
 
       // Tüm tier'lar sorulup EN İYİ çıktı alınır. İlk çalışanı seçmek ince bir
       // havuza düşüp fiyatı düşük gösterir; token o zaman sapma filtresine
@@ -878,6 +900,7 @@ async function main(): Promise<void> {
   const zincirler: ChainId[] = secilen.length > 0 ? secilen : ['solana', 'base', 'arbitrum'];
 
   const cfg = loadConfig();
+  PROBE_USD = cfg.scan.tradeSizeQuote;
   const dex = JSON.parse(readFileSync(resolve(ROOT, 'config/dex.json'), 'utf8')) as DexContracts;
 
   console.log(`\n${C.bold}${C.cyan}TOKEN KEŞFİ${C.reset} ${C.dim}(${zincirler.join(', ')})${C.reset}`);
@@ -1137,6 +1160,21 @@ async function main(): Promise<void> {
       return;
     }
     gorulen.set(anahtar, t.symbol);
+  }
+
+  // `loadConfig`'in kendi doğrulaması — format, decimals (≤18), yinelenen
+  // adres VE izleme listesinin `dex[]` girdileriyle çakışma. Yukarıdaki yerel
+  // kontrol bunların yalnızca birini kapsıyordu; eksik kopya "dosya yazıldı,
+  // bot açılmıyor" üretiyordu.
+  try {
+    tokenTablosunuDogrula([
+      ...birlesik,
+      ...cfg.tokens.filter((t) => t.kaynak === 'izleme-listesi'),
+    ]);
+  } catch (e) {
+    console.error(`${C.red}${C.bold}✗ YAZILMADI${C.reset} — ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
   }
 
   writeFileSync(

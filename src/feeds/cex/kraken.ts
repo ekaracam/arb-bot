@@ -119,6 +119,7 @@ export class KrakenFeed extends BaseCexFeed {
         exchangeTs,
         recvTs,
       );
+      this.markData(recvTs);
     }
   }
 }

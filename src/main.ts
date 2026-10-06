@@ -208,7 +208,13 @@ async function main(): Promise<void> {
   const feeds: Feed[] = [];
   for (const venue of venues) {
     const markets = registry.symbolsFor(venue);
-    if (markets.length === 0) continue;
+    if (markets.length === 0) {
+      // Sessiz atlama bu botun hata sınıfı: feed kurulmayınca panelde satırı
+      // bile olmuyor. Sebep (liste hatası / hepsi elendi) başlangıçta görünsün.
+      const sebep = registry.failedVenues.get(venue);
+      log(`⚠ ${venue}: taranacak sembol yok, feed kurulmadı${sebep ? ` — ${sebep}` : ''}`);
+      continue;
+    }
     feeds.push(createFeed(venue, store, markets));
   }
 
@@ -345,6 +351,7 @@ async function main(): Promise<void> {
     // Pozisyon limitini taradığımız işlem büyüklüğüyle hizala, yoksa her
     // fırsat "sermaye limiti aşıldı" diye işaretlenir.
     maxPositionQuote: cfg.scan.tradeSizeQuote,
+    maxDexSignalAgeMs: cfg.scan.maxDexPriceAgeMs,
     allowUnverified: cfg.scan.allowUnverifiedTransfer,
   });
 
@@ -547,7 +554,8 @@ async function main(): Promise<void> {
     if (runLogTimer) clearInterval(runLogTimer);
     scanner.stop();
     await Promise.all(feeds.map((f) => f.stop()));
-    persist?.stop();
+    // Son tamponun diske inmesi beklenir; `process.exit` bekleyen yazımı keser.
+    await persist?.stop();
 
     const s = scanner.stats;
     console.log(

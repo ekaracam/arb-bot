@@ -78,5 +78,6 @@ export class GateFeed extends BaseCexFeed {
     if (exchangeTs > 0) this.recordLatency(exchangeTs, recvTs);
 
     this.store.write(slot, +(r.b ?? 0), +(r.B ?? 0), +(r.a ?? 0), +(r.A ?? 0), exchangeTs, recvTs);
+    this.markData(recvTs);
   }
 }

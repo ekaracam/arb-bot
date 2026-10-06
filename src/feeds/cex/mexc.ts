@@ -123,6 +123,13 @@ class MexcConnection extends BaseCexFeed {
       if (msg.code !== undefined && msg.code !== 0) {
         throw new Error(`MEXC abonelik hatası ${msg.code}: ${msg.msg ?? ''}`);
       }
+      // Ret `code: 0` ile de gelebiliyor: `{"code":0,"msg":"Not Subscribed
+      // successfully! … Blocked!"}`. Normal onay `msg`'de kanal adını taşır;
+      // bu kalıp yalnızca redde özgü. Yakalanmazsa bağlantı canlı görünür ve
+      // 30 sembol sessizce hiç fiyat almaz.
+      if (msg.code === 0 && typeof msg.msg === 'string' && /not subscribed|blocked/i.test(msg.msg)) {
+        throw new Error(`MEXC abonelik reddi: ${msg.msg.slice(0, 120)}`);
+      }
       return;
     }
 
@@ -147,6 +154,7 @@ class MexcConnection extends BaseCexFeed {
     if (sendTime > 0) this.recordLatency(sendTime, recvTs);
 
     this.store.write(slot, bid, bidQty, ask, askQty, sendTime, recvTs);
+    this.markData(recvTs);
   }
 }
 

@@ -110,6 +110,9 @@ export interface RaydiumQuote {
   readonly etkiPct: number | null;
 }
 
+/** Önbellek bu boyutu aşınca süresi dolmuşlar atılır. */
+const ONBELLEK_BUDAMA_ESIGI = 2000;
+
 export class RaydiumQuoter {
   private readonly cache = new Map<string, { at: number; sonuc: RaydiumQuote | null }>();
   private calls = 0;
@@ -151,11 +154,23 @@ export class RaydiumQuoter {
    * @param amount girdi miktarı, ham birimde
    * @returns çıktı miktarı ve fiyat etkisi, rota yoksa null
    */
+  /**
+   * Süresi dolmuş girdileri atar. Anahtar `in:out:amount` ve satış miktarı
+   * her adayda farklı, yani her doğrulama YENİ girdi ekliyor; budanmazsa
+   * uzun koşuda on binlerce girdi birikir (ölçülen tahmin ~86k/gün).
+   */
+  private budaOnbellek(): void {
+    if (this.cache.size < ONBELLEK_BUDAMA_ESIGI) return;
+    const simdi = Date.now();
+    for (const [k, v] of this.cache) if (simdi - v.at >= this.ttlMs) this.cache.delete(k);
+  }
+
   async quote(
     inputMint: string,
     outputMint: string,
     amount: bigint,
   ): Promise<RaydiumQuote | null> {
+    this.budaOnbellek();
     const key = `${inputMint}:${outputMint}:${amount}`;
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.at < this.ttlMs) return cached.sonuc;
@@ -163,7 +178,13 @@ export class RaydiumQuoter {
     // Geri çekilme penceresindeyken istek ATILMAZ. Bloklu uca yüklenmek bloğu
     // uzatıyor; ayrıca sonuç önbelleğe de yazılmaz (arıza geçici, tokenı
     // kalıcı olarak kör bırakmamalı).
-    if (Date.now() < this.bloklandiUntil) return null;
+    // `null` döndürmek bloğu "rota yok" gibi gösterirdi — tam olarak
+    // `raydiumHatasiMi`nin önlemeye çalıştığı karışıklık. Fırlatılan hata
+    // tarayıcıda `dexQuoteError` olarak sayılır ve panelde görünür.
+    if (Date.now() < this.bloklandiUntil) {
+      const kalanSn = Math.ceil((this.bloklandiUntil - Date.now()) / 1000);
+      throw new Error(`raydium geri çekilmede (${kalanSn} sn)`);
+    }
 
     this.calls++;
     let res: {

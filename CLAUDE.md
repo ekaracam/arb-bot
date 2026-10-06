@@ -200,6 +200,20 @@ Camelot) bu yola girmez: onlar zaten belirli bir işlem büyüklüğü için quo
 gerçek miktarı yazıyor. Scanner arayüzü dar (`DexLegQuoter`) — mint adreslerini
 ve decimals'ı bilmez, testler sahte quoter enjekte eder.
 
+**"EVM bu yola girmez" yalnızca ALIŞ bacağı için doğruydu — satış yönü yapısal
+olarak KAPALIYDI (ölçüldü, düzeltildi).** EVM/CoW feed'i `bidQty`'ye $tradeSize'lık
+alışla elde edilen miktarı yazıyor (`bought = tradeSize/ask`). Kârlı bir CEX→DEX
+adayında CEX'ten alınan miktar bundan HER ZAMAN büyük (`cexAsk < dexBid < dexAsk`
+⇒ `tradeSize/cexAsk > tradeSize/dexAsk`), dolayısıyla satış `l1Fill`'den hiç tam
+dönmüyor, `quoteDexLeg`'e düşüyor ve orada EVM için doğrulayıcı olmadığından
+(`VenueLegQuoter` yalnızca Solana) her CEX→EVM DEX ve EVM DEX↔DEX adayı
+`rejectedByDepth` oluyordu. `data/` kayıtlarında EVM venue 265 kez alış tarafında,
+yalnızca 2 kez satış tarafındaydı (o ikisi de bozuk quote). Şimdi işlem, DEX satış
+quote'unun geçerli olduğu miktara KIRPILIYOR (`neededBase = bidQty`); daha küçük
+alışı aynı VWAP ile değerlemek muhafazakâr. Solana (`bidQty = 0`) eski yoldan
+devam eder. Test: "CEX→EVM DEX: satış bacağı DEX quote miktarına kırpılır" —
+`baseRig`'in 1e6'lık miktarı bu hatayı yıllarca gizledi; gerçekçi `bidQty` şart.
+
 **`DexLegQuoter`'ın anahtarı VENUE'dur, zincir değil.** Bir dönem `chain`
 alıyordu ve o imza aynı zincirde ikinci bir venue'yu yapısal olarak imkânsız
 kılıyordu: `jupiter` de `raydium` da 'solana' der, dolayısıyla Raydium'da
@@ -1059,6 +1073,14 @@ gerçek yaş iki katına çıkar. Tazeleme üst üste başarısız olursa (`refr
 hatayı yutar, doğru olan bu) sinyal artık `transfer tablosu N dk'dır tazelenemedi`
 uyarısı taşır — `TRANSFER_TABLE_STALE_MS`, üç pencere.
 
+**Bu uyarı uzun süre TETİKLENEMEZDİ.** `fetchedAt` `refresh()`'in sonunda
+koşulsuz yazılıyordu: KuCoin, Gate ve imzalı uçların hepsi düşse bile tablo "taze"
+sayılıyor, `tableAgeMs` "son başarılı tazeleme" değil "son deneme" ölçüyordu.
+Artık kaynak BAŞINA zaman tutuluyor (`kucoinAt`, `gateAt`, `privateAt`) ve tablo
+yaşı, bir kez de olsa başarılı olmuş kaynakların EN ESKİSİ — hiç çalışmamış bir
+anahtar tabloyu bayat göstermez (o zaten `credentialErrors`'ta). `lookup()` de
+borsanın kendi kaynağının zamanını döndürür.
+
 **2. Gate'in ÖLÜ listeleme kayıtları canlı kaydı EZİYORDU.** Gate delisting'de
 kaydı silmiyor, `_OLD` / `_OLD2` / `_1` sonekiyle saklıyor ve o kayıtların durum
 bayrakları eski (genelde "açık") kalıyor. Taban coin adı ilk alt çizgiye kadar
@@ -1113,6 +1135,21 @@ listesi yok, çekim durumu yok, kontrat adresi yok). Bu yüzden `KRAKEN_API_KEY`
 olmadan Kraken bacakları zincir varlığını başka borsalardan devralıp iyimser
 davranmak zorunda; yani "ortak zincir yok" durumu tespit EDİLEMEZ ve RWA
 hatasının sınıfı Kraken tarafında açık kalır.
+
+**Kraken varlık kodu bir KALIPLA çözülmez.** "4 harfli ve X/Z ile başlıyorsa ilk
+harfi at" kuralı (XXBT→XBT→BTC için doğru) öneksiz her 4 harfli coini bozuyordu:
+ZEUS→EUS, ZORA→ORA, ZETA→ETA, ZBCN→BCN, XAUT→AUT, XTER→TER. Sembol kaydı
+`wsname`'den "ZEUS" okuduğu için `lookup('kraken','ZEUS')` tabloda hiçbir şey
+bulamıyor, çekim/yatırma `false` dönüyor ve o coinlerin tüm Kraken rotaları
+sessizce eleniyordu. Önek yalnızca sonlu bir v1 listesinde var; artık
+`KRAKEN_ESKI_KODLAR` tablosu kullanılıyor.
+
+**MEXC'in ağ adı `netWork` alanında.** `normalizeChain(n.network ?? n.netWork)`
+yazımı `network` doluyken (`"Solana(SOL)"`, o dönem tanınmıyordu) `netWork`'ü
+(`"SOL"`) hiç denemiyordu; sonuç MEXC'in TÜM Solana/Arbitrum satırlarının tabloya
+girmemesi ve "suskunluk = kapalı" kuralıyla o rotaların sessizce elenmesiydi —
+veride anahtar sonrası `mexc|solana` = 0 (öncesi 114/151). `binanceStyleChain`
+her alanı AYRI dener; `normalizeChain` parantezli biçimi de çözüyor.
 
 Anahtarla `/0/private/WithdrawMethods` çekiliyor. Kapsamadığı iki şey var:
 **çekim ücreti** (Kraken genel tablo vermiyor; `/0/private/WithdrawInfo`
@@ -1217,11 +1254,32 @@ Bunlar süs değil, gözlenen hata modlarına verilmiş yanıtlar — kaldırmad
   düşülerek hesaplanır. Ham fark gecikme değildir (lokal saat kayması içerir).
 - **Sessiz ölüm watchdog**: bağlantı açıkken veri akışının durması, kopmuş bağlantıdan
   daha tehlikelidir — sağlık paneli "live" derken motor bayat fiyatla fırsat hesaplar.
-- **Kaldıraçlı token kalıbı sona bakmaz**: `isLeveragedTicker` öndeki tabanın en
-  az üç karakter olmasını arar. Yalnızca soneke bakan sürüm **JUP**'ı ("UP" ile
-  biter) kaldıraçlı sayıp altı borsada listeli bir coini hiç taramıyordu. Bu hata
-  sınıfı sessizdir: eksik çift hata üretmez, sadece yoktur — bu yüzden davranış
-  [test/symbol-registry.test.ts](test/symbol-registry.test.ts) ile sabitlendi.
+  **Çerçeve ≠ veri.** Watchdog uzun süre her çerçevede tazelenen `lastTickTs`'e
+  bakıyordu; pong 15–20 sn'de bir, Kraken heartbeat'i ~1 sn'de bir geldiği için
+  abonelikler sunucuda düşse bile sayaç hiç bayatlamıyor, yalnızca TCP kopması
+  yakalanıyordu. Artık alt sınıflar `store.write` sonrası `markData()` çağırır;
+  watchdog ve paneldeki `lastTickAgeMs` o zamana bakar. Veri sessizliği eşiği
+  çerçeve eşiğinden gevşek (`dataStaleMs = max(2×, 60 sn)`): az sembollü bir
+  bağlantıda (MEXC'in 30'lukları) L1 bir süre gerçekten değişmeyebilir.
+- **viem `allowFailure: true` HİÇBİR hatayı fırlatmaz.** Ağ, timeout, 429 dahil
+  her şey `{status:'failure', error}` girdisine çevrilir. `EvmDexFeed`'in `catch`
+  dalı bu yüzden gerçek RPC arızasında hiç çalışmıyor, bütün alışlar `null`
+  geliyor, her token'ın `failStreak`'i artıyor ve 20 tur sonra tablo "rotasız"
+  ilan ediliyordu — teşhis metni de "RPC değil" diyordu (127.0.0.1:9 ile ölçüldü:
+  22 turda hepsi `idle`). `tasimaArizasiMi()` taşıma katmanı hatalarını
+  (`HttpRequestError`, `TimeoutError`, soket, RPC kota) ayıklayıp fırlatır; revert
+  ve boş dönüş veri olarak kalır. Test sahtesi `Promise.reject` ettiği için bunu
+  göremiyordu; artık viem biçimini taklit eden ikinci bir test var.
+- **Kaldıraçlı token kalıbı sona bakmaz — ve ölçüt kalıbın şekli değil kimliktir**:
+  `isLeveragedTicker(base, knownBases)` soneki atınca kalan taban AYNI BORSADA
+  listeli bir coinse kaldıraçlı sayar (BTC3L↔BTC, OP3L↔OP). Yalnızca soneke bakan
+  ilk sürüm **JUP**'ı ("UP" ile biter) eliyordu; "taban ≥ 3 karakter" yaması onu
+  kurtardı ama **SYRUP** ("SYR"+"UP"), GROUP, STARTUP'ı elemeye devam etti —
+  SYRUP çok borsada listeliyken 1189 çiftlik fiyat tablosunda yoktu. Bu hata
+  sınıfı sessizdir: eksik çift hata üretmez, sadece yoktur — davranış
+  [test/symbol-registry.test.ts](test/symbol-registry.test.ts) ile sabit. Küme
+  verilmeyen tek-sembol sorguları (`kapsam`, `discover-tokens`) yaklaşık kalıba
+  düşer.
 - **Sesli uyarı da dedup'lu**: [notify/sound.ts](src/notify/sound.ts) yalnızca
   `recordGate` "yeni/iyileşmiş" dediğinde çalar ve üstüne kendi cooldown'ı vardır
   (`SOUND_COOLDOWN_MS`). Her tetiklenmede çalmak sesi bilgi taşımayan bir uğultuya
@@ -1319,16 +1377,17 @@ Bunlar süs değil, gözlenen hata modlarına verilmiş yanıtlar — kaldırmad
   "veri" ile "bize ulaşamıyoruz"u aynı kovaya koymak, teşhisi yanlış tarafa
   yönlendirir.
 
-  **Aynı kural JUPITER'de İHLAL EDİLMİŞ durumda — açık madde.**
-  [jupiter.ts:273](src/feeds/dex/jupiter.ts#L273) `catch { return null }` yapıp
-  `null`'ı önbelleğe de yazıyor, sayaç da onu `empty` kovasına koyuyor. Panel
-  `665 denendi │ 16 başarılı │ 643 rota yok` diyordu; ölçüldüğünde o 643'ün
-  neredeyse tamamı **HTTP 429**'du. Yani kota tükenmesi likidite yokluğu olarak
-  raporlanıyor ve bakan kişi tokenları silmeye yönelirdi. CoW'daki ayırt edici
-  test buraya KOPYALANAMAZ: CoW `errorType` alanlı JSON döndürüyordu, Jupiter
-  ise düz metin (`Rate limit exceeded, please try again later.`) — burada
-  bakılacak şey HTTP 429'un kendisi. Ayrıca 429'da `null` önbelleğe yazmak
-  tokenı gereksiz yere daha uzun kör bırakıyor.
+  **Aynı kural JUPITER'de de uygulanıyor (uzun süre açık maddeydi).**
+  `DexQuoter.quote` eskiden `catch { return null }` yapıp `null`'ı önbelleğe de
+  yazıyor, sayaç onu `empty` kovasına koyuyordu. Panel `665 denendi │ 16
+  başarılı │ 643 rota yok` diyordu; ölçüldüğünde o 643'ün neredeyse tamamı
+  **HTTP 429**'du — kota tükenmesi likidite yokluğu olarak raporlanıyor ve bakan
+  kişi tokenları silmeye yönelirdi. Ayırt edici işaret CoW'dakinden farklı:
+  Jupiter gerçek "rota yok"u **HTTP 400 + `errorCode` alanlı JSON** ile verir
+  (`jupiterHatasiMi`), 429 ise düz metin. Artık yalnızca o durum `null` + önbellek;
+  429/5xx/timeout FIRLATILIR, tarayıcıda `dexQuoteError` + `lastDexQuoteError`
+  olarak görünür ve önbelleğe yazılmaz. Raydium'un geri çekilme penceresi de aynı
+  sebeple `null` yerine fırlatıyor. Test: [test/jupiter.test.ts](test/jupiter.test.ts).
 - **Bloklu uca yüklenmeye devam etmek bloğu UZATIR.** Başarısız tur
   zamanlayıcıyı durdurmadığı için `CowFeed` bloklu uca saniyede 2 istek atmayı
   sürdürüyordu; CloudFront kararını süregelen yüke göre verdiğinden bu kendi

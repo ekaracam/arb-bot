@@ -18,13 +18,14 @@ import assert from 'node:assert/strict';
 import { EvmDexFeed, type MulticallClient, type EvmToken } from '../src/feeds/dex/evm.ts';
 import { PriceStore } from '../src/book/price-store.ts';
 import { pairKey, type PairKey, type VenueId } from '../src/core/types.ts';
+import { ContractFunctionRevertedError, HttpRequestError } from 'viem';
 
 const USDC = '0x0000000000000000000000000000000000000001' as const;
 const SEMBOLLER = ['AAA', 'BBB', 'CCC', 'DDD', 'EEE', 'FFF'] as const;
 /** Varsayılan rig boyutu — çoğu test iki token ile yeterince şey anlatıyor. */
 const VARSAYILAN = 2;
 
-type Tur = { status: 'success' | 'failure'; result?: unknown };
+type Tur = { status: 'success' | 'failure'; result?: unknown; error?: unknown };
 
 /** `getAmountsOut` (Aerodrome) biçiminde başarılı sonuç — SON eleman miktar. */
 const ok = (miktar: bigint): Tur => ({ status: 'success', result: [0n, miktar] });
@@ -293,6 +294,53 @@ test('RPC arızası tokenları rotasız ilan ETMEZ', async () => {
   const h = r.saglik();
   assert.equal(h.state, 'live');
   assert.equal(h.lastError, null, 'hiçbir token rotasız sayılmamalıydı');
+});
+
+test('RPC taşıma hatası `failure` GİRDİSİ olarak gelse de arıza sayılır (viem allowFailure)', async () => {
+  // viem `allowFailure: true` ile ağ hatasını FIRLATMAZ; her çağrıyı
+  // `{status:'failure', error}` yapar. Üstteki testin sahtesi `reject` ettiği
+  // için gerçeği temsil etmiyordu: canlıda RPC çökünce tokenlar rotasız ilan
+  // ediliyor, venue `idle`'a düşüyor ve RPC düzelse bile 100 tur kör kalıyordu
+  // (127.0.0.1:9 ile ölçüldü, 22 turda hepsi idle).
+  const r = rig();
+  const agHatasi = (): Tur =>
+    ({
+      status: 'failure',
+      error: new HttpRequestError({ url: 'http://test.invalid', details: 'connection refused' }),
+    }) as Tur;
+  r.setSonuc((c) => c.map(agHatasi));
+  for (let i = 0; i < 30; i++) await r.tur();
+
+  const bozuk = r.saglik();
+  assert.equal(bozuk.state, 'failed');
+  assert.match(bozuk.lastError ?? '', /RPC:/, 'teşhis RPC demeli, "havuz yok" değil');
+
+  r.setSonuc((c) => {
+    assert.equal(c.length, 2, 'RPC düzelince tüm tokenlar yeniden sorgulanmalı');
+    return c.map(() => ok(10n ** 18n));
+  });
+  await r.tur();
+  const h = r.saglik();
+  assert.equal(h.state, 'live');
+  assert.equal(h.lastError, null, 'hiçbir token rotasız sayılmamalıydı');
+});
+
+test('kontrat revert\'i veri sayılır, arıza değil (failure + revert hatası)', async () => {
+  // Ters yön de sabit: viem revert'i de `failure` girdisi yapar ama o VERİDİR
+  // (havuz yok). Taşıma arızası sayılsaydı havuzsuz tek token tüm turu
+  // düşürürdü.
+  const r = rig(1);
+  const revertHatasi = (): Tur =>
+    ({
+      status: 'failure',
+      error: new ContractFunctionRevertedError({ abi: [], functionName: 'getAmountsOut' }),
+    }) as Tur;
+  r.setSonuc((c) => c.map(revertHatasi));
+  for (let i = 0; i < 3; i++) await r.tur();
+  const h = r.saglik();
+  assert.equal(h.state, 'failed');
+  assert.match(h.lastError ?? '', /havuz yok/, 'revert veri: havuz yok');
+  assert.doesNotMatch(h.lastError ?? '', /RPC:/, 'revert RPC arızası gibi raporlanmamalı');
 });
 
 // ---------------------------------------------------------------------------

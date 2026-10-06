@@ -113,7 +113,11 @@ class KucoinConnection extends BaseCexFeed {
     const msg = JSON.parse(data.toString()) as KucoinMsg;
 
     if (msg.type === 'error') {
-      throw new Error(`KuCoin hata ${msg.code}: ${msg.topic ?? ''}`);
+      // Sebep `data` alanında (string) gelir; `topic` hata mesajında yok.
+      const sebep = (msg as { data?: unknown }).data;
+      throw new Error(
+        `KuCoin hata ${msg.code}: ${typeof sebep === 'string' ? sebep : (msg.topic ?? '')}`,
+      );
     }
     if (msg.type !== 'message' || !msg.topic || !msg.data) return;
 
@@ -136,6 +140,7 @@ class KucoinConnection extends BaseCexFeed {
     const askQty = d.asks?.[1] ? +d.asks[1] : 0;
 
     this.store.write(slot, bid, bidQty, ask, askQty, exchangeTs, recvTs);
+    this.markData(recvTs);
   }
 }
 

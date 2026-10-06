@@ -112,5 +112,6 @@ export class BybitFeed extends BaseCexFeed {
     }
 
     this.store.write(slot, bid, bidQty, ask, askQty, exchangeTs, recvTs);
+    this.markData(recvTs);
   }
 }

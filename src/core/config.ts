@@ -70,7 +70,12 @@ function envNum(key: string, fallback: number): number {
 function envBool(key: string, fallback: boolean): boolean {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
-  return v === '1' || v.toLowerCase() === 'true';
+  const n = v.trim().toLowerCase();
+  if (n === '1' || n === 'true') return true;
+  if (n === '0' || n === 'false') return false;
+  // `yes`/`on`/`evet` sessizce false oluyordu — dosyanın kendi ilkesine
+  // aykırı: yanlış yazılmış değer varsayılana düşmez, hata verir.
+  throw new Error(`${key}="${v}" tanınmadı — 1/0 ya da true/false yaz`);
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +265,48 @@ export interface AppConfig {
  * Adresin ZATEN tabloda olması hata değil: girdi yalnızca gereksizdir ve
  * `npm run izle` bunu "zaten tokens.json'da" diye raporlar.
  */
+/**
+ * Token tablosu doğrulaması: aynı (chain, address) iki kez girilmemeli ve
+ * adresler zincire uygun formatta olmalı. Bu tablo yanlışsa yanlış token'ı
+ * arbitraja sokarız — en pahalı hata sınıfı.
+ *
+ * Dışa açık: `discover-tokens --yaz` yazmadan ÖNCE aynı kuralı uygular.
+ * Eskiden script kendi (eksik) kopyasını tutuyordu — decimals 36'ya kadar
+ * kabul ediyor, izleme listesinin `dex[]` girdileriyle çakışmaya bakmıyordu —
+ * ve "dosya yazıldı, bot artık açılmıyor" hatası buradan geliyordu.
+ */
+export function tokenTablosunuDogrula(
+  tokens: readonly {
+    symbol: string;
+    chain: string;
+    address: string;
+    decimals: number;
+    kaynak?: string;
+  }[],
+): void {
+  const seen = new Set<string>();
+  for (const t of tokens) {
+    // Hata mesajı kaynağı SÖYLEMELİ: aynı doğrulama iki dosyadan beslenirken
+    // "geçersiz adres" demek, kullanıcıyı yanlış dosyada arattırır.
+    const nereden = t.kaynak === 'izleme-listesi' ? IZLEME_DOSYASI : 'config/tokens.json';
+    const key = `${t.chain}:${t.address.toLowerCase()}`;
+    if (seen.has(key)) throw new Error(`${nereden}: yinelenen token ${key}`);
+    seen.add(key);
+
+    if (t.chain === 'solana') {
+      if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(t.address)) {
+        throw new Error(`${nereden} → ${t.symbol}: geçersiz Solana mint adresi "${t.address}"`);
+      }
+    } else if (!/^0x[0-9a-fA-F]{40}$/.test(t.address)) {
+      throw new Error(`${nereden} → ${t.symbol}: geçersiz EVM adresi "${t.address}"`);
+    }
+
+    if (!Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 18) {
+      throw new Error(`${nereden} → ${t.symbol}: geçersiz decimals ${t.decimals}`);
+    }
+  }
+}
+
 function tokenTablosu(
   dosya: readonly TokenEntry[],
   izleme: IzlemeListesi,
@@ -367,30 +414,7 @@ export function loadConfig(): AppConfig {
     if (override) chains[id] = { ...c, rpcUrl: override };
   }
 
-  // Token tablosu doğrulaması: aynı (chain, address) iki kez girilmemeli ve
-  // adresler zincire uygun formatta olmalı. Bu tablo yanlışsa yanlış token'ı
-  // arbitraja sokarız — en pahalı hata sınıfı.
-  const seen = new Set<string>();
-  for (const t of tokens) {
-    // Hata mesajı kaynağı SÖYLEMELİ: aynı doğrulama iki dosyadan beslenirken
-    // "geçersiz adres" demek, kullanıcıyı yanlış dosyada arattırır.
-    const nereden = t.kaynak === 'izleme-listesi' ? IZLEME_DOSYASI : 'config/tokens.json';
-    const key = `${t.chain}:${t.address.toLowerCase()}`;
-    if (seen.has(key)) throw new Error(`${nereden}: yinelenen token ${key}`);
-    seen.add(key);
-
-    if (t.chain === 'solana') {
-      if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(t.address)) {
-        throw new Error(`${nereden} → ${t.symbol}: geçersiz Solana mint adresi "${t.address}"`);
-      }
-    } else if (!/^0x[0-9a-fA-F]{40}$/.test(t.address)) {
-      throw new Error(`${nereden} → ${t.symbol}: geçersiz EVM adresi "${t.address}"`);
-    }
-
-    if (!Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 18) {
-      throw new Error(`${nereden} → ${t.symbol}: geçersiz decimals ${t.decimals}`);
-    }
-  }
+  tokenTablosunuDogrula(tokens);
 
   // API anahtarları: yarım girilmiş kimlik sessizce yok sayılmaz. Anahtarı olup
   // secret'ı olmayan bir borsa, kullanıcının doldurduğunu sandığı ama aslında
@@ -415,7 +439,9 @@ export function loadConfig(): AppConfig {
   }
 
   const minNetPct = envNum('MIN_NET_PCT', 0.4) / 100;
-  const prefilterPct = envNum('PREFILTER_PCT', 0.15) / 100;
+  // Varsayılan belgelenen değerle aynı (0.3): 0.15 kuyruğu doyuruyordu, bkz.
+  // CLAUDE.md "PREFILTER_PCT, MIN_NET_PCT'in hemen altında olmalı".
+  const prefilterPct = envNum('PREFILTER_PCT', 0.3) / 100;
   if (prefilterPct > minNetPct) {
     throw new Error(
       `PREFILTER_PCT (${prefilterPct * 100}%) MIN_NET_PCT'ten (${minNetPct * 100}%) büyük olamaz — ` +
@@ -492,6 +518,17 @@ export function loadConfig(): AppConfig {
     throw new Error(
       'TELEGRAM_ENABLED=1 ama TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID eksik',
     );
+  }
+  // Sıfır/negatif değer sessizce bozuk davranış üretir: `UI_REFRESH_HZ=0`
+  // `setInterval(Infinity)` → Node 1 ms'e çeker ve ekran temizleme döngüsü
+  // işlemciyi yakar; `TRADE_SIZE_QUOTE=0` her adayı anlamsız yapar.
+  for (const [ad, deger] of [
+    ['TRADE_SIZE_QUOTE', cached.scan.tradeSizeQuote],
+    ['EVAL_INTERVAL_MS', cached.scan.evalIntervalMs],
+    ['VERIFY_COOLDOWN_MS', cached.scan.verifyCooldownMs],
+    ['UI_REFRESH_HZ', cached.ui.refreshHz],
+  ] as const) {
+    if (!(deger > 0)) throw new Error(`${ad} pozitif olmalı (okunan: ${deger})`);
   }
 
   return cached;

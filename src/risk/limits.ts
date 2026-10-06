@@ -17,8 +17,16 @@ export interface RiskLimits {
   readonly maxPositionQuote: number;
   /** Günlük kümülatif kayıp limiti (quote). Aşılırsa kill-switch. */
   readonly maxDailyLossQuote: number;
-  /** Bu yaştan eski fiyata dayanan fırsat yürütülmez (ms). */
+  /** Bu yaştan eski CEX fiyatına dayanan fırsat yürütülmez (ms). */
   readonly maxSignalAgeMs: number;
+  /**
+   * DEX bacağı için ayrı eşik. DEX fiyatı HTTP ile çekilir ve periyodu
+   * kaynağın limiti belirler (Jupiter ~11 sn, EVM turu 10–14 sn); tek eşik
+   * kullanılınca HER CEX↔DEX sinyali "sinyal yaşı" ile işaretleniyordu —
+   * koşu günlüklerindeki 82 risk notunun 82'si buydu. Tarayıcıda düzeltilen
+   * `maxAgeFor` hatasının risk katmanındaki karşılığı.
+   */
+  readonly maxDexSignalAgeMs: number;
   /** Doğrulanmamış transfer bilgisiyle işlem yapılsın mı? */
   readonly allowUnverified: boolean;
   /** Gerçekçi olmayacak kadar yüksek kâr — genelde veri hatasıdır. */
@@ -29,6 +37,7 @@ export const DEFAULT_LIMITS: RiskLimits = {
   maxPositionQuote: 1000,
   maxDailyLossQuote: 200,
   maxSignalAgeMs: 2000,
+  maxDexSignalAgeMs: 30_000,
   allowUnverified: false,
   // %20 üzeri "fırsat" neredeyse her zaman bozuk fiyat, delist edilmiş coin
   // veya çekimi kapalı bir varlıktır. Otomasyonda bunlara girmek felakettir.
@@ -75,8 +84,16 @@ export class RiskManager {
       );
     }
 
-    if (opp.worstAgeMs > this.limits.maxSignalAgeMs) {
-      reasons.push(`sinyal yaşı ${opp.worstAgeMs}ms > ${this.limits.maxSignalAgeMs}ms`);
+    // Bacak BAŞINA, venue türüne göre — `worstAgeMs` tek eşikle ölçülünce
+    // meşru olarak 11–30 sn yaşında olan DEX bacağı her sinyali engelliyordu.
+    for (const leg of [opp.buy, opp.sell]) {
+      const limit =
+        leg.kind === 'dex-buy' || leg.kind === 'dex-sell'
+          ? this.limits.maxDexSignalAgeMs
+          : this.limits.maxSignalAgeMs;
+      if (leg.ageMs > limit) {
+        reasons.push(`${leg.venue} fiyat yaşı ${leg.ageMs}ms > ${limit}ms`);
+      }
     }
 
     if (!opp.transferVerified && !this.limits.allowUnverified) {

@@ -72,10 +72,29 @@ test('sermaye limitle tam eşitken kayan nokta yüzünden işaretlenmez', () => 
   assert.deepEqual(v.reasons, [], `sermaye=${0.1 * 10_000}`);
 });
 
-test('bayat sinyal işaretlenir', () => {
+test('bayat sinyal işaretlenir — bacak başına, venue türüne göre', () => {
   const r = new RiskManager({ ...DEFAULT_LIMITS, maxSignalAgeMs: 2000, allowUnverified: true });
-  const v = r.check(opp({ worstAgeMs: 5000 }));
-  assert.ok(v.reasons.some((x) => x.includes('sinyal yaşı')));
+  const o = opp();
+  const v = r.check({ ...o, buy: { ...o.buy, ageMs: 5000 }, worstAgeMs: 5000 });
+  assert.ok(v.reasons.some((x) => x.includes('fiyat yaşı')));
+
+  // DEX bacağı meşru olarak 11–30 sn yaşında olabilir; tek eşik (2 sn) her
+  // CEX↔DEX sinyalini engelliyordu (82 risk notunun 82'si buydu).
+  const dex = r.check({
+    ...o,
+    kind: 'cex-dex',
+    sell: { ...o.sell, kind: 'dex-sell', venue: 'jupiter', ageMs: 12_000 },
+    worstAgeMs: 12_000,
+  });
+  assert.deepEqual(dex.reasons, [], 'DEX bacağı kendi eşiğiyle ölçülmeli');
+
+  const dexBayat = r.check({
+    ...o,
+    kind: 'cex-dex',
+    sell: { ...o.sell, kind: 'dex-sell', venue: 'jupiter', ageMs: 45_000 },
+    worstAgeMs: 45_000,
+  });
+  assert.ok(dexBayat.reasons.some((x) => x.includes('jupiter fiyat yaşı')));
 });
 
 test('doğrulanmamış transfer varsayılan olarak engellenir', () => {
@@ -93,7 +112,14 @@ test('gerçekçi olmayacak kadar yüksek kâr veri hatası sayılır', () => {
 
 test('birden fazla ihlal hepsi birden raporlanır', () => {
   const r = new RiskManager({ ...DEFAULT_LIMITS, maxPositionQuote: 10 });
-  const v = r.check(opp({ worstAgeMs: 99_999, transferVerified: false, netPct: 0.9 }));
+  const o = opp();
+  const v = r.check({
+    ...o,
+    buy: { ...o.buy, ageMs: 99_999 },
+    worstAgeMs: 99_999,
+    transferVerified: false,
+    netPct: 0.9,
+  });
   assert.equal(v.reasons.length, 4);
 });
 

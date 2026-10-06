@@ -72,12 +72,15 @@ export class NdjsonWriter {
     this.flushTimer = setInterval(() => this.flush(), 1000);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = null;
     this.flush();
-    this.stream?.end();
+    const s = this.stream;
     this.stream = null;
+    // `end()` beklenmezse `process.exit` son parçayı diske inmeden keser ve
+    // kapanışta basılan `written` da son yazımı içermez.
+    if (s) await new Promise<void>((r) => s.end(() => r()));
   }
 
   write(opp: Opportunity): void {
@@ -131,8 +134,13 @@ export class NdjsonWriter {
     this.stream = createWriteStream(resolve(this.dir, `opportunities-${day}.ndjson`), {
       flags: 'a',
     });
-    this.stream.on('error', (e) => {
+    const s = this.stream;
+    s.on('error', (e) => {
       this.lastError = e.message;
+      // Hatalı akış kapanmış sayılır; `null` bırakmak bir sonraki `flush`'ın
+      // `rotate` ile yeniden açmasını sağlar. Eskiden akış UTC gün dönene
+      // kadar kapalı kalıyor ve o güne kadarki her kayıt kayboluyordu.
+      if (this.stream === s) this.stream = null;
     });
   }
 }

@@ -88,6 +88,7 @@ export class OkxFeed extends BaseCexFeed {
         exchangeTs,
         recvTs,
       );
+      this.markData(recvTs);
     }
   }
 }

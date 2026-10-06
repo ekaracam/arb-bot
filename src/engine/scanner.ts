@@ -240,6 +240,9 @@ export class Scanner {
   private candidateCount = 0;
   private opportunityCount = 0;
   private rejectedByDepth = 0;
+  /** L2 defteri ÇEKİLEMEDİĞİ için elenen bacak — ince defterden ayrı teşhis. */
+  private rejectedByDepthFetch = 0;
+  private lastDepthFetchError: string | null = null;
   private rejectedByTransfer = 0;
   /** Ham farkı makul olmayan (muhtemel veri hatası) diye önceliği düşürülen aday. */
   private makulDegilAday = 0;
@@ -270,6 +273,9 @@ export class Scanner {
   private persistentCount = 0;
   private droppedCount = 0;
   private lastEvalDurationUs = 0;
+  /** `verify()` içinde yakalanan istisnalar — sessiz kalmamalı. */
+  private verifyErrors = 0;
+  private lastVerifyError: string | null = null;
 
   // DEX quote sayaçları.
   //
@@ -409,6 +415,8 @@ export class Scanner {
       candidateCount: this.candidateCount,
       opportunityCount: this.opportunityCount,
       rejectedByDepth: this.rejectedByDepth,
+      rejectedByDepthFetch: this.rejectedByDepthFetch,
+      lastDepthFetchError: this.lastDepthFetchError,
       rejectedByTransfer: this.rejectedByTransfer,
       makulDegilAday: this.makulDegilAday,
       rejectedByImpact: this.rejectedByImpact,
@@ -421,6 +429,8 @@ export class Scanner {
       persistentCount: this.persistentCount,
       droppedCount: this.droppedCount,
       lastEvalDurationUs: this.lastEvalDurationUs,
+      verifyErrors: this.verifyErrors,
+      lastVerifyError: this.lastVerifyError,
       queueDepth: this.queue.length,
       netHesaplanan: this.netHesaplanan,
       enIyiNetPct: this.enIyiNetPct,
@@ -532,7 +542,6 @@ export class Scanner {
       // dolduğunda ya da kapasite boşken aday yeniden denenmeli.
       const inceHavuz =
         now < this.inceHavuzSonu[bestAskSlot]! || now < this.inceHavuzSonu[bestBidSlot]!;
-      if (inceHavuz) this.inceHavuzOnceliksiz++;
 
       const makulDegil = rawPct > IMPLAUSIBLE_RAW_PCT;
       const oncelik =
@@ -569,6 +578,8 @@ export class Scanner {
       // sayacı, ait olduğu kümenin alt kümesi olmalı — yoksa panel kendi
       // içinde çelişir ve okuyan kişi oranı yanlış hesaplar.
       if (makulDegil) this.makulDegilAday++;
+      // Aynı sebeple burada: soğumaya takılan tekrarlar sayılmasın.
+      if (inceHavuz) this.inceHavuzOnceliksiz++;
       this.lastQueuedAt[pairIndex] = now;
       this.queue.push({
         pair,
@@ -615,7 +626,12 @@ export class Scanner {
 
       this.inFlight++;
       void this.verify(cand)
-        .catch(() => undefined)
+        .catch((e) => {
+          // İz bırakmadan yutmak, bir handler ya da quoter istisnasının
+          // Telegram bildirimini sessizce atlaması demekti.
+          this.verifyErrors++;
+          this.lastVerifyError = (e as Error).message;
+        })
         .finally(() => {
           this.inFlight--;
           this.verifying.delete(`${cand.pair}|${cand.buyVenue}|${cand.sellVenue}`);
@@ -661,7 +677,29 @@ export class Scanner {
     const bidQty = this.store.bidQty(c.sellSlot);
     if (!(bestAsk > 0) || !(bestBid > 0)) return;
 
-    const neededBase = tradeSize / bestAsk;
+    // İşlem büyüklüğü, DEX satış bacağının quote EDİLDİĞİ miktara kırpılır.
+    //
+    // EVM ve CoW feed'leri `bidQty`'ye orta fiyat değil, $tradeSize'lık
+    // alışla elde edilen GERÇEK miktarı yazıyor (`bought = tradeSize / ask`).
+    // Kârlı bir CEX→DEX adayında CEX'ten alınan miktar bundan HER ZAMAN
+    // büyüktür (cexAsk < dexBid < dexAsk ⇒ tradeSize/cexAsk > tradeSize/dexAsk),
+    // dolayısıyla satış bacağı `l1Fill`'den hiç tam dönmüyor ve
+    // `quoteDexLeg`'e düşüyordu — orada EVM venue'ları için doğrulayıcı YOK
+    // (`VenueLegQuoter` yalnızca Solana'yı tanır), yani her CEX→EVM DEX ve
+    // EVM DEX↔DEX adayı `rejectedByDepth` ile eleniyordu. Ölçüldü: 265 kayıtta
+    // EVM venue alış tarafında, yalnızca 2'sinde satış tarafında (o ikisi de
+    // bozuk quote). Yön yapısal olarak kapalıydı.
+    //
+    // DEX quote'u tam `bidQty` kadar token için gerçek; işlemi o büyüklüğe
+    // kırpmak muhafazakârdır (daha küçük alışın VWAP'ı daha iyi olurdu).
+    // Solana bacakları `bidQty = 0` yazdığı için bu yola girmez, eskisi gibi
+    // `quoteDexLeg` ile doğrulanır.
+    let neededBase = tradeSize / bestAsk;
+    let etkinTradeSize = tradeSize;
+    if (isDex(c.sellVenue) && bidQty > 0 && bidQty < neededBase) {
+      neededBase = bidQty;
+      etkinTradeSize = bidQty * bestAsk;
+    }
 
     // --- Alış tarafı ------------------------------------------------------
     // L1 derinliği talebi karşılıyorsa REST'e hiç gitmeyiz: hem hızlı hem
@@ -673,11 +711,20 @@ export class Scanner {
       const symbol = this.registry.venuesFor(c.pair).get(c.buyVenue);
       if (!symbol) return;
       const book = await this.depth.get(c.buyVenue, c.pair, symbol);
-      if (!book || book.asks.length === 0) {
+      // `null` = defter ÇEKİLEMEDİ (429, timeout, bozuk cevap) — "defter
+      // ince" ile aynı kovaya konunca altyapı bloğu likidite yokluğu gibi
+      // görünüyordu ve "derinlikten düşenlerin %94'ü ince CEX defteri"
+      // sonucu bu sayaçtan çıkarılamıyordu.
+      if (!book) {
+        this.rejectedByDepthFetch++;
+        this.lastDepthFetchError = `${c.buyVenue} ${c.pair}`;
+        return;
+      }
+      if (book.asks.length === 0) {
         this.rejectedByDepth++;
         return;
       }
-      buyFill = buyWithQuote(book.asks, tradeSize);
+      buyFill = buyWithQuote(book.asks, etkinTradeSize);
       if (!buyFill.complete) {
         // Defterin tamamı bile talebi karşılamıyor — bu boyutta işlem yapılamaz.
         this.rejectedByDepth++;
@@ -689,16 +736,25 @@ export class Scanner {
       // Solana geniş taraması miktar yazmaz (orta fiyat verir); gerçek
       // gerçekleşecek miktarı ancak quote çağrısı söyler. EVM feed'leri miktarı
       // zaten yazdığı için buraya düşmez.
-      const base = await this.quoteDexLeg('buy', c.buyVenue, c.pair, tradeSize, c.buySlot);
+      const base = await this.quoteDexLeg('buy', c.buyVenue, c.pair, etkinTradeSize, c.buySlot);
       if (base === null) {
         this.rejectedByDepth++;
         return;
       }
-      buyFill = dexFill(base, tradeSize, bestAsk, 'buy');
+      buyFill = dexFill(base, etkinTradeSize, bestAsk, 'buy');
     }
 
-    const baseBought = buyFill.filledBase;
+    let baseBought = buyFill.filledBase;
+    let spentQuote = buyFill.filledQuote;
     if (!(baseBought > 0)) return;
+    // REST defteri L1'den iyi fiyat verip kırpılan miktardan fazlasını
+    // doldurmuş olabilir; DEX satış quote'u yalnızca `bidQty` için geçerli.
+    // Alış VWAP'ı daha büyük miktar için ölçüldü, daha azına uygulamak
+    // muhafazakâr.
+    if (isDex(c.sellVenue) && bidQty > 0 && baseBought > bidQty) {
+      spentQuote = buyFill.vwap * bidQty;
+      baseBought = bidQty;
+    }
 
     // --- Satış tarafı -----------------------------------------------------
     let sellFill = l1Fill(bestBid, bidQty, baseBought);
@@ -706,7 +762,12 @@ export class Scanner {
       const symbol = this.registry.venuesFor(c.pair).get(c.sellVenue);
       if (!symbol) return;
       const book = await this.depth.get(c.sellVenue, c.pair, symbol);
-      if (!book || book.bids.length === 0) {
+      if (!book) {
+        this.rejectedByDepthFetch++;
+        this.lastDepthFetchError = `${c.sellVenue} ${c.pair}`;
+        return;
+      }
+      if (book.bids.length === 0) {
         this.rejectedByDepth++;
         return;
       }
@@ -724,6 +785,21 @@ export class Scanner {
         return;
       }
       sellFill = dexFill(baseBought, quote, bestBid, 'sell');
+    }
+
+    // Bayatlık, `await`'lerden SONRA yeniden ölçülür. Derinlik çekimi rate
+    // kovasında bekleyebilir (+4 sn timeout), DEX quote'u Jupiter kovasında
+    // (1/sn) — başta taze olan bacak buraya gelene kadar eşiği aşmış olabilir
+    // ve eski kod bunu ne eliyor ne "fiyat yaşı" uyarısına yazıyordu. Ölçü,
+    // başta okunan `recvTs`'lerdir: slot sonradan tazelense bile kullandığımız
+    // DEĞERLER o andakiler.
+    const araNow = Date.now();
+    if (
+      araNow - buyRecv > this.maxAgeFor(c.buySlot) ||
+      araNow - sellRecv > this.maxAgeFor(c.sellSlot)
+    ) {
+      this.rejectedByStale++;
+      return;
     }
 
     // --- Transfer yolu ----------------------------------------------------
@@ -749,7 +825,6 @@ export class Scanner {
 
     // --- Maliyetler -------------------------------------------------------
     const gasQuote = this.gasCost(c.buyVenue) + this.gasCost(c.sellVenue);
-    const spentQuote = buyFill.filledQuote;
 
     const baseAfterWithdraw = baseAfterBuyFee - route.withdrawFee;
     if (!(baseAfterWithdraw > 0)) {
@@ -798,7 +873,11 @@ export class Scanner {
 
     if (netPct < this.cfg.scan.minNetPct) return;
 
-    const oppId = `${coin}|${c.buyVenue}->${c.sellVenue}`;
+    // Quote USDT dışıysa kimliğe girer: izleme listesinde `quotes:["USD"]`
+    // ile BTC/USD ve BTC/USDT aynı kimliği paylaşıp tracker, recordGate,
+    // Telegram dedup ve panel listesinde birbirine karışırdı. USDT'de eski
+    // biçim korunuyor (data/ ve kalibrasyon geçmişi).
+    const oppId = `${coin}${quote === 'USDT' ? '' : `/${quote}`}|${c.buyVenue}->${c.sellVenue}`;
     this.tracker.shouldEmit(oppId, netPct, now);
     const persist = this.tracker.persistence(oppId, now);
 
@@ -867,7 +946,13 @@ export class Scanner {
     // komisyon tarifesinde OLMAYAN bir maliyet ve kullanıcı sinyale bakarken
     // rakamın neden düşük olduğunu görebilmeli. Sessiz bırakmak, modeli
     // doğrulanamaz yapardı.
-    if (this.cfg.hisseTokenleri.has(coin.toUpperCase()) && this.cfg.scan.hisseTokenEkPct > 0) {
+    // Yalnızca CEX bacağı taşıyan sinyalde: DEX↔DEX (ör. jupiter↔raydium)
+    // sinyalinde kesinti uygulanmıyor, uyarı da olmamalı.
+    if (
+      this.cfg.hisseTokenleri.has(coin.toUpperCase()) &&
+      this.cfg.scan.hisseTokenEkPct > 0 &&
+      (isCex(c.buyVenue) || isCex(c.sellVenue))
+    ) {
       warnings.push(
         `hisse tokeni: CEX bacağı başına %${(this.cfg.scan.hisseTokenEkPct * 100).toFixed(2)} ` +
           `ek kesinti kâra dahil edildi (mekanizma belgelenmemiş, büyüklük ölçüldü)`,
@@ -901,8 +986,8 @@ export class Scanner {
     // ortadan kaldıran ayrım.
     const caprazSonuc = await this.caprazKontrolEt(
       c,
-      tradeSize,
-      buyFill.filledBase,
+      spentQuote,
+      baseBought,
       baseBought,
       sellFill.filledQuote,
     );
@@ -923,6 +1008,9 @@ export class Scanner {
       }
     }
 
+    // Yaşlar YAYIN anında: `now` doğrulamanın başı, aradaki await'ler
+    // (derinlik, quote, çapraz kontrol) saniyeler sürebilir.
+    const yayinAni = Date.now();
     const buyLeg: Leg = {
       kind: isCex(c.buyVenue) ? 'cex-buy' : 'dex-buy',
       venue: c.buyVenue,
@@ -931,7 +1019,7 @@ export class Scanner {
       bestPrice: bestAsk,
       qty: baseBought,
       feeQuote: buyFee,
-      ageMs: now - buyRecv,
+      ageMs: yayinAni - buyRecv,
     };
 
     const sellLeg: Leg = {
@@ -942,7 +1030,7 @@ export class Scanner {
       bestPrice: bestBid,
       qty: baseAfterWithdraw,
       feeQuote: sellFee,
-      ageMs: now - sellRecv,
+      ageMs: yayinAni - sellRecv,
     };
 
     const opp: Opportunity = {
@@ -974,8 +1062,8 @@ export class Scanner {
             },
           }
         : {}),
-      detectedAt: now,
-      worstAgeMs: worstAge,
+      detectedAt: yayinAni,
+      worstAgeMs: Math.max(buyLeg.ageMs, sellLeg.ageMs),
     };
 
     this.opportunityCount++;

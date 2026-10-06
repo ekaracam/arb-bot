@@ -17,6 +17,14 @@
  */
 
 import {
+  BaseError,
+  HttpRequestError,
+  InternalRpcError,
+  LimitExceededRpcError,
+  ResourceUnavailableRpcError,
+  SocketClosedError,
+  TimeoutError,
+  WebSocketRequestError,
   createPublicClient,
   http,
   webSocket,
@@ -157,7 +165,45 @@ export interface EvmDexConfig {
   readonly camelot?: { quoterV2: Address };
 }
 
-type MulticallResult = { status: 'success' | 'failure'; result?: unknown };
+type MulticallResult = { status: 'success' | 'failure'; result?: unknown; error?: unknown };
+
+/**
+ * `failure` girdisi TAŞIMA arızası mı, yoksa veri mi?
+ *
+ * viem `allowFailure: true` ile HİÇBİR hatayı fırlatmaz: ağ, timeout, 429 da
+ * dahil her şey `{status:'failure', error}` girdisine çevrilir
+ * (viem/actions/public/multicall.js, "results.push({ error, status: 'failure' })").
+ * Dolayısıyla `poll()`'un `catch` dalı gerçek RPC arızasında hiç çalışmıyordu:
+ * bütün alışlar `null` geliyor, `alisOk === 0` oluyor, her token'ın
+ * `failStreak`'i artıyor ve 20 tur sonra tablo "rotasız" ilan ediliyordu —
+ * teşhis metni de "rota/kontrat sorunu, RPC değil" diyordu. Ölçüldü:
+ * 127.0.0.1:9'a (connection refused) bağlı gerçek viem istemcisi 22 turda tüm
+ * tokenları `idle`'a düşürdü. Test bunu göremiyordu çünkü sahte istemci
+ * `Promise.reject` yapıyordu; gerçek viem bunu yapmıyor.
+ *
+ * Ayrım: taşıma katmanı (HTTP, timeout, soket, RPC kota/iç hata) ARIZADIR ve
+ * fırlatılır — `catch` dalı `errorCount`'u artırıp "RPC: …" yazar ve
+ * `failStreak`'e dokunmaz. Kontrat revert'i, boş dönüş, "execution reverted"
+ * ise VERİDİR (havuz yok ya da multicall gas bütçesi) ve `failure` olarak
+ * kalır. Hata taşımayan `failure` (test sahteleri) de veri sayılır.
+ */
+export function tasimaArizasiMi(e: unknown): boolean {
+  if (e === undefined || e === null) return false;
+  // viem dışı bir hata buraya ancak ağ katmanından gelir.
+  if (!(e instanceof BaseError)) return true;
+  return (
+    e.walk(
+      (c) =>
+        c instanceof HttpRequestError ||
+        c instanceof TimeoutError ||
+        c instanceof WebSocketRequestError ||
+        c instanceof SocketClosedError ||
+        c instanceof LimitExceededRpcError ||
+        c instanceof InternalRpcError ||
+        c instanceof ResourceUnavailableRpcError,
+    ) !== null
+  );
+}
 
 /**
  * Art arda kaç kötü tur sonra durum `failed` olur.
@@ -446,7 +492,12 @@ export class EvmDexFeed implements Feed {
 
       const sellFlat = await this.multicallChunked(sellCalls);
 
-      const now = Date.now();
+      // Zaman damgası turun BAŞI: alış quote'u o anda alındı ve EVM bacağı
+      // Aşama 2'de yeniden quote edilmiyor — store'daki değer doğrudan kâr
+      // hesabına giriyor. Tur sonu yazılınca uniswap-v3-base'de 10–14 sn'lik
+      // tur kadar genç görünüyor, "≤30 sn" sanılan fiyat ~44 sn'ye kadar eski
+      // olabiliyordu. CoW feed'i zaten böyle yapıyor (muhafazakâr yön).
+      const now = turBasi;
       const yazildi = new Uint8Array(this.priced.length);
       let written = 0;
       let satisOk = 0;
@@ -595,7 +646,15 @@ export class EvmDexFeed implements Feed {
         contracts: parca as never,
         allowFailure: true,
       });
-      for (const x of r) out.push(x);
+      for (const x of r) {
+        // Taşıma arızası tek bir girdide bile görünse tur geçersiz: aynı
+        // parçadaki diğer çağrılar da aynı sebeple düştü ve sonraki parçalar
+        // da büyük ihtimalle düşecek. `catch` dalına taşıyoruz.
+        if (x.status === 'failure' && tasimaArizasiMi(x.error)) {
+          throw x.error instanceof Error ? x.error : new Error(String(x.error));
+        }
+        out.push(x);
+      }
     }
     return out;
   }

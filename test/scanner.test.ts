@@ -167,6 +167,35 @@ test('DEX bacağı quote ile doğrulanır ve fırsat üretebilir', async () => {
   assert.equal(r.emitted[0]!.kind, 'cex-dex');
 });
 
+test('CEX→EVM DEX: satış bacağı DEX quote miktarına kırpılır, sinyal üretilir', async () => {
+  // Ölçülen yapısal hata: EVM feed'i bidQty'ye tradeSize/ask yazıyor; CEX'ten
+  // alınan miktar bundan hep büyük olduğu için satış l1Fill'den tam dönmüyor,
+  // quoteDexLeg'e düşüyor ve orada EVM için doğrulayıcı olmadığından her
+  // CEX→EVM adayı "derinlik" ile eleniyordu. 265 kayıtta EVM hep alış
+  // tarafındaydı. Burada gerçekçi miktar yazılır (baseRig'in 1e6'sı değil).
+  const r = rig({
+    venues: ['aerodrome', 'binance'],
+    cfg: { prefilterPct: 0.001, minNetPct: 0.004, takerFees: { binance: 0 } },
+  });
+  r.transfers.setChains('KOIN', ['solana', 'base']);
+  const now = Date.now();
+  const dexAsk = 1.06;
+  const bought = 1000 / dexAsk; // feed'in $1000 için yazdığı gerçek miktar
+  r.store.write(r.slot('aerodrome'), 1.05, bought, dexAsk, bought, now, now);
+  quote(r, 'binance', 0.99, 1e6, 1.0, 1e6);
+  await r.run();
+
+  assert.equal(r.scanner.stats.dexQuoteTried, 0, "EVM bacağı quoter'a gitmemeli");
+  assert.equal(r.scanner.stats.rejectedByDepth, 0);
+  assert.equal(r.emitted.length, 1, 'CEX→EVM DEX sinyali üretilmeliydi');
+  const o = r.emitted[0]!;
+  assert.equal(o.kind, 'cex-dex');
+  assert.equal(o.buy.venue, 'binance');
+  assert.equal(o.sell.venue, 'aerodrome');
+  // İşlem DEX quote'unun geçerli olduğu miktara kırpıldı.
+  assert.ok(Math.abs(o.buy.qty - bought) < 1e-6, `alış miktarı ${o.buy.qty} ≠ ${bought}`);
+});
+
 test('quoter rota bulamazsa aday derinlik gerekçesiyle elenir', async () => {
   const q = fakeLegQuoter({});
   const r = rig({
@@ -641,16 +670,33 @@ test('aşama 2: defterin tamamı bile yetmiyorsa fırsat reddedilir', async () =
   assert.equal(r.scanner.stats.rejectedByDepth, 1);
 });
 
-test('aşama 2: L2 defteri alınamazsa fırsat sessizce düşer', async () => {
+test('aşama 2: L2 defteri ÇEKİLEMEZSE fırsat düşer ve ARIZA olarak sayılır', async () => {
   const r = rig();
   quote(r, 'binance', 0.99, 5, 1.0, 5);
   quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
-  // depth.set çağrılmadı → fetcher null döner.
+  // depth.set çağrılmadı → fetcher null döner = çekilemedi (429/timeout).
+
+  await r.run();
+
+  assert.equal(r.emitted.length, 0);
+  // Altyapı bloğu ile ince defter AYRI kovada: aynı sayaçta görünselerdi
+  // "derinlikten düşenlerin %94'ü ince CEX defteri" sonucu çıkarılamazdı.
+  assert.equal(r.scanner.stats.rejectedByDepthFetch, 1);
+  assert.equal(r.scanner.stats.rejectedByDepth, 0);
+  assert.match(r.scanner.stats.lastDepthFetchError ?? '', /binance/);
+});
+
+test('aşama 2: defter çekildi ama BOŞ ise "derinlik yok" sayılır', async () => {
+  const r = rig();
+  quote(r, 'binance', 0.99, 5, 1.0, 5);
+  quote(r, 'kucoin', 1.05, 1e6, 1.06, 1e6);
+  r.depth.set('binance', PAIR, { asks: [], bids: [] });
 
   await r.run();
 
   assert.equal(r.emitted.length, 0);
   assert.equal(r.scanner.stats.rejectedByDepth, 1);
+  assert.equal(r.scanner.stats.rejectedByDepthFetch, 0);
 });
 
 // ---------------------------------------------------------------------------

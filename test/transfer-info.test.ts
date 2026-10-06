@@ -11,10 +11,62 @@ import assert from 'node:assert/strict';
 
 import {
   TransferInfoProvider,
+  binanceStyleChain,
   gateTablosunuKur,
+  krakenAssetToTicker,
   krakenDepositChain,
   normalizeChain,
 } from '../src/engine/transfer-info.ts';
+
+// ---------------------------------------------------------------------------
+// Ayrıştırma hataları — ikisi de canlı veride ölçüldü, ikisi de SESSİZDİ
+// ---------------------------------------------------------------------------
+
+test('mexc: `network` tanınmasa da `netWork` denenir (Solana(SOL) biçimi)', () => {
+  // `network ?? netWork` yazımı `network` doluyken ikincisini hiç denemiyordu;
+  // sonuç mexc|solana = 0 sinyal (anahtar öncesi 114/151).
+  assert.equal(binanceStyleChain({ network: 'Solana(SOL)', netWork: 'SOL' }), 'solana');
+  assert.equal(binanceStyleChain({ network: 'Arbitrum One(ARB)', netWork: 'ARB' }), 'arbitrum');
+  assert.equal(binanceStyleChain({ network: 'SOL' }), 'solana');
+  assert.equal(binanceStyleChain({ name: 'Base' }), 'base');
+  assert.equal(binanceStyleChain({ network: 'TRX' }), null);
+});
+
+test('normalizeChain: parantezli biçim her iki parçadan da çözülür', () => {
+  assert.equal(normalizeChain('Solana(SOL)'), 'solana');
+  assert.equal(normalizeChain('Arbitrum One(ARB)'), 'arbitrum');
+  assert.equal(normalizeChain('Tron(TRX)'), null);
+});
+
+test('kraken varlık kodu: önek yalnızca eski kodlarda atılır, ZEUS/ZORA/XAUT bozulmaz', () => {
+  // Eski kalıp "4 harfli X/Z" diyordu: ZEUS→EUS, XAUT→AUT. Sembol kaydı ZEUS
+  // dediği için tabloda eşleşme kalmıyor, Kraken rotaları sessizce eleniyordu.
+  assert.equal(krakenAssetToTicker('XXBT'), 'BTC');
+  assert.equal(krakenAssetToTicker('XBT'), 'BTC');
+  assert.equal(krakenAssetToTicker('XETH'), 'ETH');
+  assert.equal(krakenAssetToTicker('XXDG'), 'DOGE');
+  assert.equal(krakenAssetToTicker('ZUSD'), 'USD');
+  assert.equal(krakenAssetToTicker('ETH2.S'), 'ETH2');
+  for (const t of ['ZEUS', 'ZORA', 'ZETA', 'ZBCN', 'XAUT', 'XTER', 'ZAMA']) {
+    assert.equal(krakenAssetToTicker(t), t, `${t} olduğu gibi kalmalı`);
+  }
+});
+
+test('tüm kaynaklar düşerse tablo TAZE sayılmaz (tableAgeMs sonsuz)', async () => {
+  // `fetchedAt` refresh sonunda koşulsuz yazılıyordu; her şey düşse de yaş 0
+  // çıkıyor ve bayat tablo uyarısı hiç tetiklenemiyordu.
+  const orijinal = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error('ağ yok');
+  }) as typeof fetch;
+  try {
+    const p = new TransferInfoProvider({});
+    await p.refresh();
+    assert.equal(p.tableAgeMs, Number.POSITIVE_INFINITY);
+  } finally {
+    globalThis.fetch = orijinal;
+  }
+});
 import { CEX_IDS } from '../src/core/types.ts';
 
 // ---------------------------------------------------------------------------

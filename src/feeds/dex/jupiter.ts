@@ -14,7 +14,7 @@
  * bacağı taşıyan her fırsat buradan geçmek zorunda.
  */
 
-import { httpJson } from '../../core/http.ts';
+import { httpJson, HttpError } from '../../core/http.ts';
 
 /** API anahtarı yoksa ücretsiz uç nokta (daha sıkı rate limit). */
 const LITE = 'https://lite-api.jup.ag';
@@ -54,6 +54,18 @@ export interface DexQuote {
  * olan budur: rota, havuz derinliği ve fiyat etkisi dahil. CEX tarafındaki
  * VWAP hesabının DEX karşılığı.
  */
+/**
+ * Gövde Jupiter'in kendi hata biçiminde mi? (`{"error":…,"errorCode":…}`)
+ * Gövde kırpılmış olabileceği için JSON.parse yerine alan adına bakılır;
+ * CDN/proxy'nin HTML'i bu kalıba uymaz.
+ */
+export function jupiterHatasiMi(govde: string): boolean {
+  return /"errorCode"\s*:|"error"\s*:/.test(govde);
+}
+
+/** Önbellek bu boyutu aşınca süresi dolmuşlar atılır. */
+const ONBELLEK_BUDAMA_ESIGI = 2000;
+
 export class DexQuoter {
   private cache = new Map<string, { at: number; quote: DexQuote | null }>();
   private calls = 0;
@@ -77,6 +89,17 @@ export class DexQuoter {
    * @param outputMint alınan token
    * @param amount     girdi miktarı, ham birimde (decimals uygulanmış)
    */
+  /**
+   * Süresi dolmuş girdileri atar. Anahtar `in:out:amount` ve satış miktarı
+   * her adayda farklı, yani her doğrulama YENİ girdi ekliyor; budanmazsa
+   * uzun koşuda on binlerce girdi birikir (ölçülen tahmin ~86k/gün).
+   */
+  private budaOnbellek(): void {
+    if (this.cache.size < ONBELLEK_BUDAMA_ESIGI) return;
+    const simdi = Date.now();
+    for (const [k, v] of this.cache) if (simdi - v.at >= this.ttlMs) this.cache.delete(k);
+  }
+
   async quote(
     inputMint: string,
     outputMint: string,
@@ -84,6 +107,7 @@ export class DexQuoter {
     inDecimals: number,
     outDecimals: number,
   ): Promise<DexQuote | null> {
+    this.budaOnbellek();
     const key = `${inputMint}:${outputMint}:${amount}`;
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.at < this.ttlMs) return cached.quote;
@@ -123,10 +147,20 @@ export class DexQuoter {
       };
       this.cache.set(key, { at: Date.now(), quote });
       return quote;
-    } catch {
+    } catch (e) {
       this.failures++;
-      this.cache.set(key, { at: Date.now(), quote: null });
-      return null;
+      // "Rota yok" Jupiter'in KENDİ cevabıdır: HTTP 400 + `errorCode` alanlı
+      // JSON. 429, 5xx ve timeout ise ARIZA — likidite yokluğu gibi
+      // raporlanamaz ve önbelleğe de yazılmaz (kota tükenmesi yüzünden tokenı
+      // 3 sn kör bırakmanın sebebi yok). Ölçüldü: panel "665 denendi │ 643
+      // rota yok" derken o 643'ün neredeyse tamamı HTTP 429'du ve bakan kişi
+      // tokenları silmeye yönelirdi. Fırlatılan hata tarayıcıda
+      // `dexQuoteError` + `lastDexQuoteError` olarak görünür.
+      if (e instanceof HttpError && e.status === 400 && jupiterHatasiMi(e.bodySnippet)) {
+        this.cache.set(key, { at: Date.now(), quote: null });
+        return null;
+      }
+      throw e;
     }
   }
 }

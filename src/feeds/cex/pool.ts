@@ -36,10 +36,17 @@ export class FeedPool implements Feed {
     return this.connections.length;
   }
 
+  /** `stop()` çağrıldıysa açılmayı bekleyen bağlantılar da açılmaz. */
+  private stopped = false;
+
   async start(): Promise<void> {
+    this.stopped = false;
     // Hepsini aynı anda açmak el sıkışma fırtınası yaratır ve borsalar bunu
     // rate-limit sayabilir.
     for (const c of this.connections) {
+      // Kapanış açılış döngüsünün ortasına denk gelirse kalan bağlantılar
+      // `start()` ile yeniden açılıp sızıyordu.
+      if (this.stopped) return;
       await c.start();
       if (this.startDelayMs > 0) {
         await new Promise((r) => setTimeout(r, this.startDelayMs));
@@ -48,6 +55,7 @@ export class FeedPool implements Feed {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     await Promise.all(this.connections.map((c) => c.stop()));
   }
 

@@ -100,7 +100,16 @@ export class TelegramNotifier {
         for (let i = 0; i < this.opts.chatIds.length; i++) {
           const chatId = this.opts.chatIds[i]!;
           const t0 = Date.now();
-          await this.send(item.text, chatId);
+          // 429: Telegram `retry_after` söyler; `send` o kadar bekleyip
+          // 'retry' döner ve mesaj BİR kez daha denenir. Eskiden bekleyip
+          // `return` ediyordu — mesaj o alıcıya hiç gitmiyor, panelde
+          // yalnızca `failed` artıyordu.
+          let sonuc = await this.send(item.text, chatId);
+          if (sonuc === 'retry') sonuc = await this.send(item.text, chatId);
+          if (sonuc === 'retry') {
+            this.failedCount++;
+            this.lastError = `chat ${chatId}: iki kez 429 — mesaj düşürüldü`;
+          }
           const elapsed = Date.now() - t0;
           const dahaVar = this.queue.length > 0 || i < this.opts.chatIds.length - 1;
           if (elapsed < minGap && dahaVar) {
@@ -113,7 +122,7 @@ export class TelegramNotifier {
     }
   }
 
-  private async send(text: string, chatId: string): Promise<void> {
+  private async send(text: string, chatId: string): Promise<'ok' | 'retry' | 'failed'> {
     const url = `https://api.telegram.org/bot${this.opts.token}/sendMessage`;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 10_000);
@@ -133,22 +142,34 @@ export class TelegramNotifier {
 
       if (!res.ok) {
         const body = await res.text().catch(() => '');
+
+        // 429: Telegram ne kadar bekleyeceğimizi söyler, uyar ve yeniden
+        // dene (çağıran taraf). Başarısızlık SAYILMAZ — nihai sonuç belli
+        // değil. Gövde JSON olmayabilir (proxy/CDN); parse hatası eskiden
+        // `catch` dalına düşüp `failed`'i ikinci kez artırıyor ve gerçek HTTP
+        // durumunu parse hatasıyla eziyordu.
+        if (res.status === 429) {
+          let retry = 1;
+          try {
+            retry = Number(
+              (JSON.parse(body) as { parameters?: { retry_after?: number } }).parameters
+                ?.retry_after ?? 1,
+            );
+          } catch {
+            /* gövde JSON değil — varsayılan 1 sn */
+          }
+          if (!Number.isFinite(retry) || retry <= 0) retry = 1;
+          await new Promise((r) => setTimeout(r, Math.min(30_000, retry * 1000)));
+          return 'retry';
+        }
+
         this.failedCount++;
         // chat id METNE dahil: bir kişi botu engellediğinde ya da hiç
         // başlatmadığında (Telegram bunu "chat not found" ile reddeder) hata
         // sessizce başka bir alıcının hatasıyla karışmamalı — hangi alıcının
         // düştüğü görünür olmalı.
         this.lastError = `chat ${chatId}: HTTP ${res.status}: ${body.slice(0, 150)}`;
-
-        // 429: Telegram ne kadar bekleyeceğimizi söyler, uyarız.
-        if (res.status === 429) {
-          const retry = Number(
-            (JSON.parse(body || '{}') as { parameters?: { retry_after?: number } })
-              .parameters?.retry_after ?? 1,
-          );
-          await new Promise((r) => setTimeout(r, Math.min(30_000, retry * 1000)));
-        }
-        return;
+        return 'failed';
       }
 
       // `lastError` BAŞARIDA sıfırlanmaz — kod tabanının diğer "son hata"
@@ -158,9 +179,11 @@ export class TelegramNotifier {
       // sessizce silinirdi — üç alıcılı bir listede ikincisi düşse bile
       // üçüncüsü başarılı olduğu an panel "hata yok" derdi.
       this.sentCount++;
+      return 'ok';
     } catch (e) {
       this.failedCount++;
       this.lastError = `chat ${chatId}: ${(e as Error).message}`;
+      return 'failed';
     } finally {
       clearTimeout(timer);
     }

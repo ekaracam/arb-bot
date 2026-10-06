@@ -53,6 +53,16 @@ export abstract class BaseCexFeed implements Feed {
   private reconnects = 0;
   private attempt = 0;
   private lastTickTs = 0;
+  /**
+   * Son FİYAT yazımı. `lastTickTs` her çerçevede (pong, heartbeat, abonelik
+   * onayı dahil) tazeleniyor; borsaların pong'u 15–20 sn'de bir, Kraken'in
+   * heartbeat'i ~1 sn'de bir geldiği için abonelikler sunucuda düşse bile
+   * `lastTickTs` hiç bayatlamıyordu — watchdog yalnızca TCP kopmasını
+   * yakalıyor, "bağlantı açık, veri yok" sınıfı hiç görünmüyordu. Alt sınıflar
+   * store'a yazdıktan sonra `markData()` çağırır; watchdog ve sağlık paneli
+   * bu zamana bakar.
+   */
+  private lastDataTs = 0;
   private lastError: string | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
@@ -62,6 +72,12 @@ export abstract class BaseCexFeed implements Feed {
   protected readonly latency = new LatencyTracker();
 
   private readonly staleTimeoutMs: number;
+  /**
+   * Veri sessizliği eşiği — çerçeve eşiğinden gevşek. Az sembollü bir
+   * bağlantıda (MEXC'in 30'luk havuzları) L1 bir süre gerçekten değişmeyebilir;
+   * bunu kopma sanıp yeniden bağlanmak bağlantı limitine yürür.
+   */
+  private readonly dataStaleMs: number;
   private readonly pingIntervalMs: number;
   private readonly maxBackoffMs: number;
   private readonly subscribeDelayMs: number;
@@ -83,6 +99,7 @@ export abstract class BaseCexFeed implements Feed {
     opts: BaseFeedOptions = {},
   ) {
     this.staleTimeoutMs = opts.staleTimeoutMs ?? 30_000;
+    this.dataStaleMs = Math.max(2 * this.staleTimeoutMs, 60_000);
     this.pingIntervalMs = opts.pingIntervalMs ?? 0;
     this.maxBackoffMs = opts.maxBackoffMs ?? 30_000;
     this.subscribeDelayMs = opts.subscribeDelayMs ?? 250;
@@ -196,6 +213,7 @@ export abstract class BaseCexFeed implements Feed {
       this.attempt = 0;
       this.lastError = null;
       this.lastTickTs = Date.now(); // watchdog'a başlangıç payı ver
+      this.lastDataTs = this.lastTickTs;
 
       void this.sendSubscriptions(ws);
       this.startPing(ws);
@@ -312,17 +330,34 @@ export abstract class BaseCexFeed implements Feed {
     }, this.pingIntervalMs);
   }
 
+  /** Alt sınıf store'a fiyat yazdığında çağırır — tek gerçek canlılık işareti. */
+  protected markData(recvTs: number): void {
+    this.lastDataTs = recvTs;
+  }
+
   /**
    * Sessiz ölüm dedektörü. Bağlantı açık görünürken veri akmıyorsa fiyatlar
    * bayatlar — bu durumda hiç bağlantı olmamasından daha tehlikelidir, çünkü
    * sağlık paneli "live" gösterirken motor eski fiyatlarla fırsat hesaplar.
+   *
+   * İki ayrı ölçü: çerçeve sessizliği (TCP/sunucu öldü) ve VERİ sessizliği
+   * (bağlantı açık ama hiçbir sembol fiyat yazmıyor — abonelikler düşmüş).
+   * İkincisi uzun süre ölçülmüyordu, bkz. `lastDataTs`.
    */
   private startWatchdog(): void {
     this.watchdogTimer = setInterval(() => {
       if (this.stopped || this.state !== 'live') return;
-      const age = Date.now() - this.lastTickTs;
-      if (age > this.staleTimeoutMs) {
-        this.onFailure(`veri akışı durdu (${Math.round(age / 1000)}s sessiz)`);
+      const now = Date.now();
+      const cerceveYasi = now - this.lastTickTs;
+      if (cerceveYasi > this.staleTimeoutMs) {
+        this.onFailure(`bağlantı sustu (${Math.round(cerceveYasi / 1000)}s hiç çerçeve yok)`);
+        return;
+      }
+      const veriYasi = now - this.lastDataTs;
+      if (veriYasi > this.dataStaleMs) {
+        this.onFailure(
+          `veri akışı durdu (${Math.round(veriYasi / 1000)}s fiyat yok, bağlantı açık)`,
+        );
       }
     }, Math.max(1000, this.staleTimeoutMs / 3));
   }
@@ -343,7 +378,8 @@ export abstract class BaseCexFeed implements Feed {
     return {
       venue: this.venue,
       state: this.state,
-      lastTickAgeMs: this.lastTickTs === 0 ? -1 : now - this.lastTickTs,
+      // Son VERİ yaşı — pong'lu ama fiyatsız bir bağlantı burada bayat görünür.
+      lastTickAgeMs: this.lastDataTs === 0 ? -1 : now - this.lastDataTs,
       msgsPerSec: this.rate.perSec(now),
       reconnects: this.reconnects,
       latencyP50: this.adjusted(0.5),

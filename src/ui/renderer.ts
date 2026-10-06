@@ -66,6 +66,8 @@ export interface RenderState {
     candidateCount: number;
     opportunityCount: number;
     rejectedByDepth: number;
+    rejectedByDepthFetch: number;
+    lastDepthFetchError: string | null;
     rejectedByTransfer: number;
     makulDegilAday: number;
     rejectedByImpact: number;
@@ -77,6 +79,8 @@ export interface RenderState {
     persistentCount: number;
     droppedCount: number;
     lastEvalDurationUs: number;
+    verifyErrors: number;
+    lastVerifyError: string | null;
     queueDepth: number;
     netHesaplanan: number;
     enIyiNetPct: number;
@@ -298,7 +302,16 @@ export class Renderer {
       `${C.dim}tarama: ${sc.evalCount} tur ${C.reset}${C.dim}│ aday ${sc.candidateCount} ` +
         `│ sinyal ${C.reset}${C.bold}${sc.opportunityCount}${C.reset}${C.dim} ` +
         `│ aktif ${C.reset}${C.bold}${s.opportunities.length}${C.reset}${C.dim} ` +
-        `│ elenen: derinlik ${sc.rejectedByDepth} transfer ${sc.rejectedByTransfer} ` +
+        `│ elenen: derinlik ${sc.rejectedByDepth} ` +
+        // Defter ÇEKİLEMEDİ ≠ defter ince: ilki altyapı (429/timeout), ikincisi
+        // likidite. Aynı kovada görünürlerse hacim filtresi yanlış veriyle
+        // ayarlanır.
+        (sc.rejectedByDepthFetch > 0
+          ? `${C.reset}${C.red}(${sc.rejectedByDepthFetch} çekilemedi` +
+            (sc.lastDepthFetchError ? ` · ${sc.lastDepthFetchError}` : '') +
+            `)${C.reset}${C.dim} `
+          : '') +
+        `transfer ${sc.rejectedByTransfer} ` +
         // Ham farkı makul olmayan aday KUYRUĞA HİÇ ALINMIYOR — ölçüldü ki
         // doğrulama bütçesinin tamamını bunlar yiyordu. Sessiz eleme bu botta
         // eleme yapmamaktan tehlikeli, o yüzden sayaç panelde.
@@ -337,6 +350,12 @@ export class Renderer {
         `${C.dim} │ net hesaplanan ${sc.netHesaplanan}${C.reset}` +
         (Number.isFinite(sc.enIyiNetPct)
           ? `${C.dim} │ en iyi net %${(sc.enIyiNetPct * 100).toFixed(2)}${C.reset}`
+          : '') +
+        // `verify()` istisnası eskiden iz bırakmadan yutuluyordu.
+        (sc.verifyErrors > 0
+          ? `${C.reset}${C.red} │ doğrulama hatası ${sc.verifyErrors}` +
+            (sc.lastVerifyError ? ` (${sc.lastVerifyError.slice(0, 40)})` : '') +
+            C.reset
           : '') +
         C.reset,
     );
@@ -387,7 +406,11 @@ export class Renderer {
       out.push(
         `${C.dim}telegram: ${s.telegram.sent} gönderildi │ ` +
           `${s.telegram.suppressed} bastırıldı (dedup) │ ` +
-          `${s.telegram.failed} başarısız${C.reset}`,
+          `${s.telegram.failed} başarısız${C.reset}` +
+          // Son hata burada basılmıyordu; yalnızca RUN_LOG açıkken görünüyordu.
+          (s.telegram.failed > 0 && s.telegram.lastError
+            ? ` ${C.red}│ ${s.telegram.lastError.slice(0, 70)}${C.reset}`
+            : ''),
       );
     }
 

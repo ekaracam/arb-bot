@@ -125,8 +125,15 @@ const fetchers: Record<CexId, Fetcher> = {
 
   async okx() {
     const r = await httpJson<{
+      code?: string;
+      msg?: string;
       data: { instId: string; baseCcy: string; quoteCcy: string; state: string }[];
     }>('https://www.okx.com/api/v5/public/instruments?instType=SPOT');
+    // OKX hatayı HTTP 200 + `code≠"0"` + `data:[]` ile verir; boş liste
+    // sanılırsa borsa logsuz atlanır ve panelde satırı bile olmaz.
+    if (r.code !== undefined && r.code !== '0') {
+      throw new Error(`okx code ${r.code}: ${r.msg ?? ''}`);
+    }
     return r.data
       .filter((s) => s.state === 'live')
       .map((s) => mk(s.instId, s.baseCcy, s.quoteCcy));
@@ -158,11 +165,18 @@ const fetchers: Record<CexId, Fetcher> = {
 
   async kraken() {
     const r = await httpJson<{
-      result: Record<
+      error?: string[];
+      result?: Record<
         string,
         { wsname?: string; base: string; quote: string; status: string }
       >;
     }>('https://api.kraken.com/0/public/AssetPairs');
+    // Kraken hatayı HTTP 200 + `{"error":[...]}` ile döndürür; `result`
+    // yokken `Object.values({})` boş liste veriyor ve Kraken bir başlangıçta
+    // SESSİZCE düşüyordu (`reg.errors` boş, `failedVenues` boş).
+    if (r.error && r.error.length > 0) {
+      throw new Error(`kraken: ${r.error.join('; ')}`);
+    }
 
     const out: VenueMarket[] = [];
     for (const p of Object.values(r.result ?? {})) {
@@ -232,16 +246,21 @@ export interface RegistryOptions {
 /**
  * Kaldıraçlı token'lar (BTC3L, ETHUP...) spot arbitrajı için geçersizdir.
  *
- * Öndeki `.{3,}` şart: kalıp yalnızca sona bakarsa gerçek coinleri de eler.
- * Ölçülen hata — **JUP** "UP" ile bittiği için kaldıraçlı sayılıyor ve altı
- * borsada da listeli olmasına rağmen hiç taranmıyordu. Sessiz bir kapsam
- * kaybıydı: hiçbir yerde hata görünmüyor, çift yalnızca yok.
+ * Kalıp sona bakar: taban + sonek. Yalnızca soneke bakmak gerçek coinleri de
+ * eler ve bu hata İKİ kez ölçüldü. Önce **JUP** ("UP" ile bitiyor, altı
+ * borsada listeli) hiç taranmıyordu; "taban en az üç karakter" şartı onu
+ * kurtardı ama **SYRUP** (taban "SYR"), GROUP, STARTUP gibi uzun tabanlıları
+ * elemeye devam etti — SYRUP çok borsada listeliyken 1189 çiftlik fiyat
+ * tablosunda yoktu. Sessiz bir kapsam kaybı: hiçbir yerde hata görünmüyor,
+ * çift yalnızca yok.
  *
- * Kaldıraçlı token'ın taban varlığı her zaman en az üç karakterdir (BTC3L,
- * ETHUP, SOLDOWN) — soneki taşıyabilmesi için bir taban varlığa ihtiyacı var.
- * Üç karakter şartı JUP'ı (taban "J") ve SOUP gibi kısa tabanlıları korur.
+ * Doğru ölçüt kalıbın ŞEKLİ değil kimlik: bir ticker ancak soneki atınca
+ * kalan taban AYNI BORSADA listeli bir coinse kaldıraçlıdır (BTC3L ↔ BTC,
+ * OP3L ↔ OP, ETHUP ↔ ETH). `knownBases` o borsanın base kümesidir; verilmezse
+ * (scriptlerdeki tek-sembol sorguları) üç karakterlik taban şartına düşülür —
+ * yaklaşık bir cevap, kayıt defteri her zaman kümeyle çağırır.
  */
-const LEVERAGED = /^.{3,}(\d+[LS]|UP|DOWN|BULL|BEAR)$/;
+const LEVERAGED_SONEK = /^(.+?)(\d+[LS]|UP|DOWN|BULL|BEAR)$/;
 
 /**
  * Bir base ticker kaldıraçlı token mu?
@@ -250,8 +269,12 @@ const LEVERAGED = /^.{3,}(\d+[LS]|UP|DOWN|BULL|BEAR)$/;
  * burada sessiz olduğu için (eksik çift hata üretmez, sadece yoktur) davranışı
  * birim testiyle sabitliyoruz.
  */
-export function isLeveragedTicker(base: string): boolean {
-  return LEVERAGED.test(base);
+export function isLeveragedTicker(base: string, knownBases?: ReadonlySet<string>): boolean {
+  const m = LEVERAGED_SONEK.exec(base);
+  if (!m) return false;
+  const taban = m[1]!;
+  if (knownBases) return knownBases.has(taban);
+  return taban.length >= 3;
 }
 
 /** Bir borsanın sembol listesinin eleme dökümü. */
@@ -413,6 +436,9 @@ export class SymbolRegistry {
       };
       reg.funnels.set(venue, funnel);
 
+      // Kaldıraçlı kalıbı için bu borsanın taban kümesi (bkz. isLeveragedTicker).
+      const venueBases = new Set(markets.map((m) => m.base));
+
       for (const m of markets) {
         const zorunluBase = zorunluBases.has(m.base);
 
@@ -443,7 +469,7 @@ export class SymbolRegistry {
           }
           muaf(m.base, 'stablecoin');
         }
-        if (isLeveragedTicker(m.base)) {
+        if (isLeveragedTicker(m.base, venueBases)) {
           if (!zorunluBase) {
             funnel.kaldiracli++;
             continue;
