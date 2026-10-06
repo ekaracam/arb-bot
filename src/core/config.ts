@@ -44,6 +44,21 @@ function envOptional(key: string): string | null {
   return v === undefined || v === '' ? null : v;
 }
 
+/**
+ * Virgülle ayrılmış liste. Boş parçalar (fazladan virgül/boşluk) SESSİZCE
+ * atılır — kullanıcı `123, ,456` yazarsa ortadaki boşluk bir chat id
+ * sanılmamalı, ama bunu da başlangıçta değil burada elemek yeterli çünkü
+ * Telegram zaten geçersiz id'yi kendi hata mesajıyla reddedecek.
+ */
+function envList(key: string): readonly string[] {
+  const v = process.env[key];
+  if (v === undefined || v === '') return [];
+  return v
+    .split(',')
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+}
+
 function envNum(key: string, fallback: number): number {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
@@ -192,7 +207,14 @@ export interface AppConfig {
   readonly telegram: {
     readonly enabled: boolean;
     readonly token: string | null;
-    readonly chatId: string | null;
+    /**
+     * Bildirim gönderilecek chat id'leri. BİRDEN FAZLA olabilir — `.env`'de
+     * `TELEGRAM_CHAT_ID` virgülle ayrılmış liste kabul eder
+     * (`123456,-100987654`). Her fırsat listedeki HERKESE ayrı ayrı
+     * gönderilir; biri başarısız olsa diğerleri etkilenmez (`send()` chat
+     * başına dener, hatasını kendi başına taşır).
+     */
+    readonly chatIds: readonly string[];
     /** Aynı fırsat için tekrar bildirim arası minimum süre (ms). */
     readonly cooldownMs: number;
     /** Cooldown içinde tekrar göndermek için gereken net% değişimi. */
@@ -446,7 +468,7 @@ export function loadConfig(): AppConfig {
     telegram: {
       enabled: envBool('TELEGRAM_ENABLED', false),
       token: envOptional('TELEGRAM_BOT_TOKEN'),
-      chatId: envOptional('TELEGRAM_CHAT_ID'),
+      chatIds: envList('TELEGRAM_CHAT_ID'),
       cooldownMs: envNum('TELEGRAM_COOLDOWN_MS', 300_000),
       resendDeltaPct: envNum('TELEGRAM_RESEND_DELTA_PCT', 0.5) / 100,
     },
@@ -466,7 +488,7 @@ export function loadConfig(): AppConfig {
     },
   };
 
-  if (cached.telegram.enabled && (!cached.telegram.token || !cached.telegram.chatId)) {
+  if (cached.telegram.enabled && (!cached.telegram.token || cached.telegram.chatIds.length === 0)) {
     throw new Error(
       'TELEGRAM_ENABLED=1 ama TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID eksik',
     );

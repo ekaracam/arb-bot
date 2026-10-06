@@ -19,7 +19,8 @@ import { Deduper } from './dedup.ts';
 
 export interface TelegramOptions {
   readonly token: string;
-  readonly chatId: string;
+  /** Birden fazla chat id — her fırsat listedeki HERKESE ayrı gönderilir. */
+  readonly chatIds: readonly string[];
   /** Aynı fırsat için tekrar gönderim arası minimum süre (ms). */
   readonly cooldownMs: number;
   /** Cooldown dolmadan tekrar göndermek için gereken net% değişimi. */
@@ -77,6 +78,16 @@ export class TelegramNotifier {
     return true;
   }
 
+  /**
+   * Kuyruğu boşaltır — her METİN, `chatIds` listesindeki HERKESE ayrı bir
+   * `sendMessage` çağrısı olarak gider.
+   *
+   * Hız sınırı SÜRE toplamı üzerinden uygulanıyor: Telegram'ın ~30 msg/sn
+   * limiti bot token'ı BAŞINA, chat başına değil. Yani 3 kişilik bir listede
+   * tek fırsat 3 ayrı API çağrısı demektir ve aralarındaki boşluk da aynı
+   * kovadan sayılmalı — chat'e göre ayrı sayaç tutmak, üç kişiye art arda
+   * gönderirken kotayı üçe katlamış gibi davranırdı.
+   */
   private async drain(): Promise<void> {
     if (this.draining) return;
     this.draining = true;
@@ -86,11 +97,15 @@ export class TelegramNotifier {
     try {
       while (this.queue.length > 0) {
         const item = this.queue.shift()!;
-        const t0 = Date.now();
-        await this.send(item.text);
-        const elapsed = Date.now() - t0;
-        if (elapsed < minGap && this.queue.length > 0) {
-          await new Promise((r) => setTimeout(r, minGap - elapsed));
+        for (let i = 0; i < this.opts.chatIds.length; i++) {
+          const chatId = this.opts.chatIds[i]!;
+          const t0 = Date.now();
+          await this.send(item.text, chatId);
+          const elapsed = Date.now() - t0;
+          const dahaVar = this.queue.length > 0 || i < this.opts.chatIds.length - 1;
+          if (elapsed < minGap && dahaVar) {
+            await new Promise((r) => setTimeout(r, minGap - elapsed));
+          }
         }
       }
     } finally {
@@ -98,7 +113,7 @@ export class TelegramNotifier {
     }
   }
 
-  private async send(text: string): Promise<void> {
+  private async send(text: string, chatId: string): Promise<void> {
     const url = `https://api.telegram.org/bot${this.opts.token}/sendMessage`;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 10_000);
@@ -108,7 +123,7 @@ export class TelegramNotifier {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          chat_id: this.opts.chatId,
+          chat_id: chatId,
           text,
           parse_mode: 'MarkdownV2',
           disable_web_page_preview: true,
@@ -119,7 +134,11 @@ export class TelegramNotifier {
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         this.failedCount++;
-        this.lastError = `HTTP ${res.status}: ${body.slice(0, 150)}`;
+        // chat id METNE dahil: bir kişi botu engellediğinde ya da hiç
+        // başlatmadığında (Telegram bunu "chat not found" ile reddeder) hata
+        // sessizce başka bir alıcının hatasıyla karışmamalı — hangi alıcının
+        // düştüğü görünür olmalı.
+        this.lastError = `chat ${chatId}: HTTP ${res.status}: ${body.slice(0, 150)}`;
 
         // 429: Telegram ne kadar bekleyeceğimizi söyler, uyarız.
         if (res.status === 429) {
@@ -132,11 +151,16 @@ export class TelegramNotifier {
         return;
       }
 
+      // `lastError` BAŞARIDA sıfırlanmaz — kod tabanının diğer "son hata"
+      // alanlarıyla (`lastDexQuoteError`, `sonInceHavuz`) aynı kural: yalnızca
+      // YENİ bir hatayla üzerine yazılır. Aksi halde çoklu alıcıda bir chat'in
+      // hatası, hemen ardından başka bir chat'e giden başarılı gönderimle
+      // sessizce silinirdi — üç alıcılı bir listede ikincisi düşse bile
+      // üçüncüsü başarılı olduğu an panel "hata yok" derdi.
       this.sentCount++;
-      this.lastError = null;
     } catch (e) {
       this.failedCount++;
-      this.lastError = (e as Error).message;
+      this.lastError = `chat ${chatId}: ${(e as Error).message}`;
     } finally {
       clearTimeout(timer);
     }

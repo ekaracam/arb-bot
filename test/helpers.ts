@@ -87,7 +87,7 @@ export function makeConfig(o: ConfigOverrides = {}): AppConfig {
     telegram: {
       enabled: false,
       token: null,
-      chatId: null,
+      chatIds: [],
       cooldownMs: 300_000,
       resendDeltaPct: 0.005,
     },

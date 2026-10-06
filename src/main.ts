@@ -367,15 +367,19 @@ async function main(): Promise<void> {
   persist?.start();
 
   let telegram: TelegramNotifier | null = null;
-  if (cfg.telegram.enabled && cfg.telegram.token && cfg.telegram.chatId) {
+  if (cfg.telegram.enabled && cfg.telegram.token && cfg.telegram.chatIds.length > 0) {
     telegram = new TelegramNotifier({
       token: cfg.telegram.token,
-      chatId: cfg.telegram.chatId,
+      chatIds: cfg.telegram.chatIds,
       cooldownMs: cfg.telegram.cooldownMs,
       resendDeltaPct: cfg.telegram.resendDeltaPct,
     });
     const check = await telegram.verify();
-    log(check.ok ? `telegram bağlı: ${check.detail}` : `⚠ telegram hatası: ${check.detail}`);
+    log(
+      check.ok
+        ? `telegram bağlı: ${check.detail} · ${cfg.telegram.chatIds.length} alıcı`
+        : `⚠ telegram hatası: ${check.detail}`,
+    );
     if (!check.ok) telegram = null;
   } else {
     log('telegram kapalı (.env içinde TELEGRAM_ENABLED=1 ile aç)');
