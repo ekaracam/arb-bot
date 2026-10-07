@@ -1653,6 +1653,20 @@ ile her 429'u ikinci istekle ödüllendiriyordu. Şimdi:
   sayılmaz), 429 hiçbir zaman yeniden denenmez. TÜM host'lara uygulanır.
   Durum `geriCekilmeDurumu(host)` / `kapaliHostlar()` ile okunur.
 
+## Coin bazında bildirim eşiği (`config/coin-esikleri.json`)
+
+Telegram + ses varsayılan olarak net ≥ %1.8'de tetiklenir (`YESIL_PCT`,
+[notify/format.ts](src/notify/format.ts)). Tek bir coin kanalı boğabiliyor —
+ölçüldü: ELIZAOS 2026-10-07'de günün kayıtlarının **%56'sıydı** (276/492,
+net %0.4–8.4). Genel eşiği yükseltmek diğer coinleri de susturacağı için eşik
+coin bazında ezilir: `"esikler": { "ELIZAOS": 10 }` (yüzde olarak).
+
+- Yalnızca BİLDİRİMİ etkiler; disk kaydı ve panel değişmez (kalibrasyon verisi
+  kaybolmasın).
+- Dosya isteğe bağlı; varsa sıkı doğrulanır — bilinmeyen alan, sayı olmayan ya
+  da (0, 100] dışı değer, aynı coinin iki yazımı botu BAŞLATMAZ. Etkin eşikler
+  başlangıç logunda basılır. Test: [test/coin-esikleri.test.ts](test/coin-esikleri.test.ts).
+
 ## Config ve .env
 
 - `config/*.json` yapısal (borsa/zincir/token/kontrat/izleme listesi), `.env`

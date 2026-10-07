@@ -9,6 +9,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { coinEsikleriniCoz } from './coin-esikleri.ts';
 import { CEX_IDS, CHAIN_IDS, type CexId, type ChainId, type FeeSchedule } from './types.ts';
 import {
   IZLEME_DOSYASI,
@@ -227,6 +228,12 @@ export interface AppConfig {
   /** Ek kesinti uygulanacak tokenlaştırılmış hisse sembolleri (büyük harf). */
   readonly hisseTokenleri: ReadonlySet<string>;
 
+  /**
+   * Coin bazında Telegram + ses eşiği (net YÜZDE, coin büyük harf) —
+   * `config/coin-esikleri.json`. Olmayan coin genel eşiği (`YESIL_PCT`) kullanır.
+   */
+  readonly coinBildirimEsikleri: ReadonlyMap<string, number>;
+
   readonly telegram: {
     readonly enabled: boolean;
     readonly token: string | null;
@@ -415,6 +422,12 @@ export function loadConfig(): AppConfig {
     ) ?? [],
   );
 
+  // Dosya isteğe bağlı: yoksa hiçbir coin özel eşik taşımaz. Varsa içeriği
+  // sıkı doğrulanır (bkz. `coinEsikleriniCoz`).
+  const coinBildirimEsikleri = existsSync(resolve(ROOT, 'config/coin-esikleri.json'))
+    ? coinEsikleriniCoz(readJson<unknown>('config/coin-esikleri.json'))
+    : new Map<string, number>();
+
   for (const id of CEX_IDS) {
     const ex = exchanges[id];
     if (!ex) throw new Error(`config/exchanges.json içinde "${id}" tanımlı değil`);
@@ -524,6 +537,7 @@ export function loadConfig(): AppConfig {
       hisseTokenEkPct: envNum('HISSE_TOKEN_EK_PCT', 1.5) / 100,
     },
     hisseTokenleri,
+    coinBildirimEsikleri,
     telegram: {
       enabled: envBool('TELEGRAM_ENABLED', false),
       token: envOptional('TELEGRAM_BOT_TOKEN'),

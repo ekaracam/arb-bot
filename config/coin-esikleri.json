@@ -1,0 +1,15 @@
+{
+  "$aciklama": [
+    "Coin bazında Telegram + sesli uyarı eşiği (net kâr, YÜZDE olarak).",
+    "Burada olmayan coinler genel eşiği kullanır (🟢 %1.8, src/notify/format.ts YESIL_PCT).",
+    "Yalnızca bildirimi etkiler: eşiğin altındaki sinyal yine diske ve panele yazılır.",
+    "",
+    "Eklemek: \"esikler\" içine \"COIN\": yüzde satırı. Örn. \"PEPE\": 5",
+    "Yanlış alan adı ya da geçersiz değer botu BAŞLATMAZ (sessizce yok sayılmaz).",
+    "",
+    "ELIZAOS: 2026-10-07'de günün kayıtlarının %56'sıydı (276/492), net %0.4-8.4."
+  ],
+  "esikler": {
+    "ELIZAOS": 10
+  }
+}
