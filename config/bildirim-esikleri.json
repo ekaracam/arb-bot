@@ -1,0 +1,21 @@
+{
+  "$aciklama": [
+    "Telegram + sesli uyarı eşikleri (net kâr, YÜZDE olarak).",
+    "Öncelik: coin > tür > genel. Hiçbirinde yoksa genel eşik (🟢 %1.8, src/notify/format.ts YESIL_PCT).",
+    "Yalnızca bildirimi etkiler: eşiğin altındaki sinyal yine diske ve panele yazılır.",
+    "",
+    "coinler: \"COIN\": yüzde. Örn. \"PEPE\": 5",
+    "turler: \"cex-cex\" | \"cex-dex\" | \"dex-dex\": yüzde",
+    "Yanlış alan adı ya da geçersiz değer botu BAŞLATMAZ (sessizce yok sayılmaz).",
+    "Değişiklikten sonra botu yeniden başlat; dosya açılışta okunur.",
+    "",
+    "ELIZAOS: 2026-10-07'de günün kayıtlarının %56'sıydı (276/492), net %0.4-8.4.",
+    "cex-cex: aynı gün kayıtların 315/498'i; Enes yalnızca %5 üstünü görmek istiyor."
+  ],
+  "coinler": {
+    "ELIZAOS": 10
+  },
+  "turler": {
+    "cex-cex": 5
+  }
+}

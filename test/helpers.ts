@@ -84,7 +84,7 @@ export function makeConfig(o: ConfigOverrides = {}): AppConfig {
       hisseTokenEkPct: o.hisseTokenEkPct ?? 0,
     },
     hisseTokenleri: new Set(o.hisseTokenleri ?? []),
-    coinBildirimEsikleri: new Map(),
+    bildirimEsikleri: { coinler: new Map(), turler: new Map() },
     telegram: {
       enabled: false,
       token: null,

@@ -9,7 +9,11 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { coinEsikleriniCoz } from './coin-esikleri.ts';
+import {
+  BOS_BILDIRIM_ESIKLERI,
+  bildirimEsikleriniCoz,
+  type BildirimEsikleri,
+} from './bildirim-esikleri.ts';
 import { CEX_IDS, CHAIN_IDS, type CexId, type ChainId, type FeeSchedule } from './types.ts';
 import {
   IZLEME_DOSYASI,
@@ -229,10 +233,10 @@ export interface AppConfig {
   readonly hisseTokenleri: ReadonlySet<string>;
 
   /**
-   * Coin bazında Telegram + ses eşiği (net YÜZDE, coin büyük harf) —
-   * `config/coin-esikleri.json`. Olmayan coin genel eşiği (`YESIL_PCT`) kullanır.
+   * Telegram + ses eşikleri (net YÜZDE) coin ve fırsat türü bazında —
+   * `config/bildirim-esikleri.json`. Öncelik coin > tür > genel (`YESIL_PCT`).
    */
-  readonly coinBildirimEsikleri: ReadonlyMap<string, number>;
+  readonly bildirimEsikleri: BildirimEsikleri;
 
   readonly telegram: {
     readonly enabled: boolean;
@@ -423,10 +427,10 @@ export function loadConfig(): AppConfig {
   );
 
   // Dosya isteğe bağlı: yoksa hiçbir coin özel eşik taşımaz. Varsa içeriği
-  // sıkı doğrulanır (bkz. `coinEsikleriniCoz`).
-  const coinBildirimEsikleri = existsSync(resolve(ROOT, 'config/coin-esikleri.json'))
-    ? coinEsikleriniCoz(readJson<unknown>('config/coin-esikleri.json'))
-    : new Map<string, number>();
+  // sıkı doğrulanır (bkz. `bildirimEsikleriniCoz`).
+  const bildirimEsikleri = existsSync(resolve(ROOT, 'config/bildirim-esikleri.json'))
+    ? bildirimEsikleriniCoz(readJson<unknown>('config/bildirim-esikleri.json'))
+    : BOS_BILDIRIM_ESIKLERI;
 
   for (const id of CEX_IDS) {
     const ex = exchanges[id];
@@ -537,7 +541,7 @@ export function loadConfig(): AppConfig {
       hisseTokenEkPct: envNum('HISSE_TOKEN_EK_PCT', 1.5) / 100,
     },
     hisseTokenleri,
-    coinBildirimEsikleri,
+    bildirimEsikleri,
     telegram: {
       enabled: envBool('TELEGRAM_ENABLED', false),
       token: envOptional('TELEGRAM_BOT_TOKEN'),

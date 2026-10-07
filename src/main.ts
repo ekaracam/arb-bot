@@ -19,7 +19,7 @@ import { TransferInfoProvider, clockSkews } from './engine/transfer-info.ts';
 import { Scanner } from './engine/scanner.ts';
 import { TelegramNotifier } from './notify/telegram.ts';
 import { YESIL_PCT } from './notify/format.ts';
-import { bildirimEsigi } from './core/coin-esikleri.ts';
+import { bildirimEsigi } from './core/bildirim-esikleri.ts';
 import { SoundAlert, sesCihazlari } from './notify/sound.ts';
 import { Renderer, type ChainStatus, type RenderState } from './ui/renderer.ts';
 import { NdjsonWriter } from './persist/ndjson.ts';
@@ -430,10 +430,11 @@ async function main(): Promise<void> {
     // 50 ms'de bir yeniden üretilir, her tekrarda çalmak sesi bilgi taşımayan
     // bir uğultuya çevirirdi. Kendi cooldown'ı ayrıca farklı coinlerin aynı
     // anda eşiği geçtiği durumu sınırlıyor.
-    // Eşik coin bazında ezilebilir (`config/coin-esikleri.json`) — tek bir
-    // coinin kanalı boğmasını genel eşiği yükseltmeden kesmek için.
+    // Eşik coin ya da fırsat türü bazında ezilebilir
+    // (`config/bildirim-esikleri.json`, öncelik coin > tür > genel) — tek bir
+    // sınıfın kanalı boğmasını genel eşiği yükseltmeden kesmek için.
     const bildirimEsigiGecti =
-      opp.netPct * 100 >= bildirimEsigi(opp.coin, cfg.coinBildirimEsikleri, YESIL_PCT);
+      opp.netPct * 100 >= bildirimEsigi(opp.coin, opp.kind, cfg.bildirimEsikleri, YESIL_PCT);
     if (fresh && bildirimEsigiGecti) sound.alert();
 
     // Risk kararı v1'de UYGULANMAZ, yalnızca kaydedilir. Amaç, otomasyona
@@ -511,10 +512,11 @@ async function main(): Promise<void> {
   );
   // Coin bazında ezilen bildirim eşikleri başlangıçta GÖRÜNMELİ — "ekledim,
   // artık susmuştur" varsayımını doğrulamanın tek yeri burası.
-  if (cfg.coinBildirimEsikleri.size > 0) {
+  const ozelEsikler = [...cfg.bildirimEsikleri.turler, ...cfg.bildirimEsikleri.coinler];
+  if (ozelEsikler.length > 0) {
     log(
-      `coin bildirim eşikleri (genel %${YESIL_PCT}): ` +
-        [...cfg.coinBildirimEsikleri].map(([c, p]) => `${c} %${p}`).join(' · '),
+      `bildirim eşikleri (genel %${YESIL_PCT}, öncelik coin > tür): ` +
+        ozelEsikler.map(([ad, p]) => `${ad} %${p}`).join(' · '),
     );
   }
 
