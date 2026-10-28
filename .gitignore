@@ -28,3 +28,9 @@ env.local
 Thumbs.db
 .vscode/
 .idea/
+
+# AI assistant instructions (local only)
+.claude/
+.codex/
+AGENTS.md
+CLAUDE.md

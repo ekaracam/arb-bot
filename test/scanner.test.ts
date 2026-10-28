@@ -1443,7 +1443,7 @@ test('çapraz kontrol desteklemediği venue’ya hiç sorulmaz', async () => {
 //
 // ÖLÇÜLDÜ: Gate ve MEXC bu çiftlere normal çiftlerle BİREBİR aynı taker
 // oranını uyguluyor (%0.2 / %0.05), yani borsanın komisyon tarifesi bu
-// maliyeti içermiyor. Kullanıcı Bybit'e Solana üzerinden yaptığı transferde
+// maliyeti içermiyor. Bybit'e Solana üzerinden yapılan bir test transferinde
 // ~%1.5 kayıp ölçtü. Modellenmezse bu 13 token sistematik bir sahte sinyal
 // kaynağıdır: %0.4 eşiğini geçen her hisse fırsatı gerçekte zarardadır.
 // ---------------------------------------------------------------------------

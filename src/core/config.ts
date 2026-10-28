@@ -273,7 +273,7 @@ export interface AppConfig {
     /** İki uyarı sesi arası asgari süre (ms). */
     readonly cooldownMs: number;
     /**
-     * Çıkış cihazı adının bir parçası (ör. `HyperX`). Tanımlıysa ses
+     * Çıkış cihazı adının bir parçası (ör. `Headphones`). Tanımlıysa ses
      * Windows'un varsayılan çıkışından BAĞIMSIZ olarak o cihazda çalar.
      */
     readonly device: string | null;
